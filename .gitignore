@@ -1,0 +1,27 @@
+# 隱私數據
+training_images/
+face_features.json
+current_session_log.json
+detection_log.json
+detection_log.json.bak
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# 虛擬環境
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+
+# Windows
+vc_redist.x64.exe
+
+# 其他
+*.log
+.DS_Store
