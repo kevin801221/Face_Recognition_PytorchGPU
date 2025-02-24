@@ -8,11 +8,32 @@ import math
 import torch
 import requests
 import ollama
+import argparse
+from dotenv import load_dotenv
+from openai import OpenAI
 from insightface.app import FaceAnalysis
 from insightface.utils import face_align
 from PySide6.QtWidgets import QApplication
 from gui.chat_window import ChatWindow
 import sys
+
+# 載入環境變數
+load_dotenv()
+
+# 解析命令行參數
+parser = argparse.ArgumentParser(description='YCM 智能門禁系統')
+parser.add_argument('--model', type=str, default='gpt4o',
+                    help='選擇要使用的 LLM 模型 (預設: gpt4o)')
+args = parser.parse_args()
+
+# 初始化 LLM
+if args.model == 'gpt4o':
+    openai_client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
+    print("使用 OpenAI GPT-4 模型")
+    USE_OPENAI = True
+else:
+    print(f"使用 Ollama 模型: {args.model}")
+    USE_OPENAI = False
 
 # API 設置
 API_BASE_URL = "https://ddfab4235344.ngrok.app/api/employees/search/by-name"
@@ -22,6 +43,11 @@ qt_app = QApplication.instance()
 if not qt_app:
     qt_app = QApplication(sys.argv)
 chat_window = ChatWindow()
+print("聊天窗口已初始化")
+
+# 顯示一條測試消息
+chat_window.show_message(f"系統啟動：YCM 館長已準備就緒！(使用 {args.model} 模型)")
+print("已發送測試消息")
 
 # 檢查 CUDA 狀態
 print("CUDA 狀態檢查:")
@@ -46,15 +72,27 @@ if torch.cuda.is_available():
 
 face_app.prepare(ctx_id=0 if torch.cuda.is_available() else -1, det_size=(320, 320))
 
-def generate_prompt(employee_data):
+def generate_prompt(employee_data, is_first_chat=True):
     """根據員工資料生成 prompt"""
-    prompt = f"""你現在是 YCM 館長，一個友善、專業的智能助手。你正在與 {employee_data['name']} 進行對話。
+    if is_first_chat:
+        prompt = f"""你現在是 YCM 館長，一個友善、專業的智能助手。你正在與 {employee_data['name']} 進行對話。
 
 你應該：
 1. 以 "哈囉 {employee_data['name']}，今天過得還好嗎？我是 YCM 館長" 開始對話
 2. 根據以下資訊，從中選擇一個有趣的點來延續對話
 3. 保持專業但友善的態度
+"""
+    else:
+        prompt = f"""你現在是 YCM 館長，一個友善、專業的智能助手。你正在與 {employee_data['name']} 進行對話。
 
+你應該：
+1. 根據以下資訊，從中選擇一個有趣的點來延續對話
+2. 不要重複之前的開場白
+3. 直接問一個有趣的問題
+4. 保持專業但友善的態度
+"""
+
+    prompt += f"""
 以下是關於 {employee_data['name']} 的資訊：
 
 基本資料：
@@ -74,44 +112,51 @@ def generate_prompt(employee_data):
 
 工作經驗：
 {chr(10).join([f"- {exp['company_name']}: {exp['position']} ({exp['description']})" for exp in employee_data['work_experiences']])}
-
-請根據以上資訊，生成一個自然的開場白，包含：
-1. "哈囉 [名字]，今天過得還好嗎？我是 YCM 館長" 
-2. 從上述資訊中選擇一個有趣的點（證書、興趣、技能等）來延續對話
-3. 保持簡短但友善的語氣
 """
     return prompt
 
-def chat_with_employee(employee_data):
-    """使用 Ollama 與員工對話"""
+def chat_with_employee(employee_data, is_first_chat=True):
+    """使用選定的 LLM 與員工對話"""
     try:
         # 生成初始 prompt
-        system_prompt = generate_prompt(employee_data)
+        system_prompt = generate_prompt(employee_data, is_first_chat)
         
-        # 建立對話
-        response = ollama.chat(
-            model='deepseek-r1:8b',
-            messages=[
-                {
-                    'role': 'system',
-                    'content': system_prompt
-                }
-            ]
-        )
-        
-        return response['message']['content']
-        
+        if USE_OPENAI:
+            # 使用 OpenAI API
+            response = openai_client.chat.completions.create(
+                model="gpt-4",
+                messages=[
+                    {"role": "system", "content": system_prompt}
+                ],
+                temperature=0.7,
+                max_tokens=300
+            )
+            return response.choices[0].message.content
+        else:
+            # 使用 Ollama
+            response = ollama.chat(
+                model='deepseek-r1:8b',
+                messages=[
+                    {
+                        'role': 'system',
+                        'content': system_prompt
+                    }
+                ]
+            )
+            return response['message']['content']
+            
     except Exception as e:
-        print(f"與 Ollama 通信時發生錯誤: {e}")
+        print(f"與 LLM 通信時發生錯誤: {e}")
         return None
 
 def get_employee_data(name):
-    """從 API 獲取員工資料"""
+    """從本地文件獲取員工資料"""
     try:
-        response = requests.get(f"{API_BASE_URL}/{name}")
-        response.encoding = 'utf-8'  # 設置響應的編碼為 UTF-8
-        if response.status_code == 200:
-            return response.json()["data"][0] if response.json()["data"] else None
+        with open('employee_data.json', 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            for employee in data['data']:
+                if employee['name'] == name:
+                    return employee
         return None
     except Exception as e:
         print(f"獲取員工資料時發生錯誤: {e}")
@@ -239,12 +284,17 @@ def realtime_face_recognition():
                             current_session_log[current_date].append(detection_record)
                             recent_detections[identity] = current_time
                             
-                            # 檢查是否需要進行新的對話（每30秒一次）
+                            # 檢查是否需要進行新的對話（每120秒一次）
                             if identity not in chat_cooldown or \
-                               (current_time_obj - datetime.strptime(chat_cooldown[identity], "%H:%M:%S")).total_seconds() > 30:
+                               (current_time_obj - datetime.strptime(chat_cooldown[identity], "%H:%M:%S")).total_seconds() > 120:
                                 if identity in employee_cache:
-                                    response = chat_with_employee(employee_cache[identity])
+                                    # 檢查是否是第一次對話
+                                    is_first_chat = identity not in chat_cooldown
+                                    response = chat_with_employee(employee_cache[identity], is_first_chat)
                                     if response:
+                                        if not is_first_chat:
+                                            # 如果不是第一次對話，使用不同的 prompt
+                                            response = response.replace("哈囉 Kevin，今天過得還好嗎？我是 YCM 館長", "")
                                         chat_window.show_message(f"YCM館長: {response}")
                                     chat_cooldown[identity] = current_time
                             
