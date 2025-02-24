@@ -192,6 +192,7 @@ def realtime_face_recognition():
     recent_detections = {}
     employee_cache = {}  # 快取員工資料
     chat_cooldown = {}  # 用於控制對話頻率
+    active_conversations = set()  # 追踪正在進行的對話
     
     # 性能優化參數
     frame_skip = 2  # 每隔幾幀處理一次
@@ -217,14 +218,14 @@ def realtime_face_recognition():
                 current_time = datetime.now().strftime("%H:%M:%S")
                 current_time_obj = datetime.strptime(current_time, "%H:%M:%S")
                 
-                # 清理舊的檢測記錄和對話冷卻時間
+                # 清理舊的檢測記錄
                 for person_id in list(recent_detections.keys()):
                     last_detection_time = datetime.strptime(recent_detections[person_id], "%H:%M:%S")
                     time_diff = (current_time_obj - last_detection_time).total_seconds()
                     if time_diff > 5:  # 如果超過5秒沒有檢測到，則移除記錄
                         del recent_detections[person_id]
-                        if person_id in chat_cooldown:
-                            del chat_cooldown[person_id]
+                        if person_id in active_conversations:
+                            active_conversations.remove(person_id)
                 
                 # 處理每個檢測到的人臉
                 for face in faces:
@@ -255,52 +256,47 @@ def realtime_face_recognition():
                         color = (0, 0, 255)  # 紅色
                         identity = "Unknown"
                     
-                    # 如果是已知人臉且置信度足夠，記錄到當前會話日誌
+                    # 如果是已知人臉且置信度足夠
                     if identity != "Unknown" and confidence > 60:
-                        # 檢查是否需要添加新的檢測記錄（避免重複記錄同一個人）
-                        if identity not in recent_detections or \
-                           (datetime.strptime(current_time, "%H:%M:%S") - 
-                            datetime.strptime(recent_detections[identity], "%H:%M:%S")).total_seconds() > 5:
-                            
+                        # 更新檢測時間
+                        recent_detections[identity] = current_time
+                        
+                        # 如果這個人不在活動對話中且已經過了冷卻時間
+                        if identity not in active_conversations and (
+                            identity not in chat_cooldown or 
+                            (current_time_obj - datetime.strptime(chat_cooldown[identity], "%H:%M:%S")).total_seconds() > 120
+                        ):
                             # 獲取員工完整資料
                             if identity not in employee_cache:
                                 employee_data = get_employee_data(identity)
                                 if employee_data:
                                     employee_cache[identity] = employee_data
                                     print(f"已獲取 {identity} 的完整資料")
-                                    
-                                    # 首次檢測到時，啟動對話
-                                    response = chat_with_employee(employee_data)
-                                    if response:
-                                        chat_window.show_message(f"YCM館長: {response}")
                             
-                            detection_record = {
-                                "time": current_time,
-                                "identity": identity,
-                                "confidence": confidence,
-                                "bbox": bbox.tolist(),
-                                "employee_data": employee_cache.get(identity)
-                            }
-                            current_session_log[current_date].append(detection_record)
-                            recent_detections[identity] = current_time
-                            
-                            # 檢查是否需要進行新的對話（每120秒一次）
-                            if identity not in chat_cooldown or \
-                               (current_time_obj - datetime.strptime(chat_cooldown[identity], "%H:%M:%S")).total_seconds() > 120:
-                                if identity in employee_cache:
-                                    # 檢查是否是第一次對話
-                                    is_first_chat = identity not in chat_cooldown
-                                    response = chat_with_employee(employee_cache[identity], is_first_chat)
-                                    if response:
-                                        if not is_first_chat:
-                                            # 如果不是第一次對話，使用不同的 prompt
-                                            response = response.replace("哈囉 Kevin，今天過得還好嗎？我是 YCM 館長", "")
-                                        chat_window.show_message(f"YCM館長: {response}")
+                            if identity in employee_cache:
+                                # 標記為正在對話中
+                                active_conversations.add(identity)
+                                
+                                # 檢查是否是首次對話
+                                is_first_chat = identity not in chat_cooldown
+                                response = chat_with_employee(employee_cache[identity], is_first_chat)
+                                
+                                if response:
+                                    # 更新對話冷卻時間
                                     chat_cooldown[identity] = current_time
-                            
-                            # 保存當前會話日誌，使用 UTF-8 編碼
-                            with open('current_session_log.json', 'w', encoding='utf-8') as f:
-                                json.dump(current_session_log, f, indent=2, ensure_ascii=False)
+                                    # 顯示回應
+                                    chat_window.show_message(f"YCM館長: {response}")
+                                    # 完成對話後移除活動對話標記
+                                    active_conversations.remove(identity)
+                                    
+                                    # 記錄到日誌
+                                    detection_record = {
+                                        "time": current_time,
+                                        "identity": identity,
+                                        "confidence": confidence,
+                                        "response": response
+                                    }
+                                    current_session_log[current_date].append(detection_record)
                     
                     # 在畫面上標註
                     cv2.rectangle(frame, (bbox[0], bbox[1]), (bbox[2], bbox[3]), color, 2)
