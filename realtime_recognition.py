@@ -16,6 +16,7 @@ from insightface.utils import face_align
 from PySide6.QtWidgets import QApplication
 from gui.chat_window import ChatWindow
 import sys
+import sqlite3
 
 # 載入環境變數
 load_dotenv()
@@ -72,8 +73,45 @@ if torch.cuda.is_available():
 
 face_app.prepare(ctx_id=0 if torch.cuda.is_available() else -1, det_size=(320, 320))
 
-def generate_prompt(employee_data, is_first_chat=True):
-    """根據員工資料生成 prompt"""
+class ConversationMemory:
+    def __init__(self):
+        self.conn = sqlite3.connect('conversation_memory.db')
+        self.setup_database()
+        
+    def setup_database(self):
+        """創建對話記憶資料庫"""
+        cursor = self.conn.cursor()
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS conversations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            person_name TEXT,
+            role TEXT,
+            message TEXT,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+        ''')
+        self.conn.commit()
+    
+    def add_message(self, person_name, message, role='user'):
+        """添加新的對話記錄"""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            'INSERT INTO conversations (person_name, role, message) VALUES (?, ?, ?)',
+            (person_name, role, message)
+        )
+        self.conn.commit()
+    
+    def get_recent_messages(self, person_name, limit=5):
+        """獲取最近的對話記錄"""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            'SELECT role, message FROM conversations WHERE person_name = ? ORDER BY timestamp DESC LIMIT ?',
+            (person_name, limit)
+        )
+        return cursor.fetchall()
+
+def generate_prompt(employee_data, recent_messages=None, is_first_chat=True):
+    """根據員工資料和對話記錄生成 prompt"""
     if is_first_chat:
         prompt = f"""你現在是 YCM 館長，一個友善、專業的智能助手。你正在與 {employee_data['name']} 進行對話。
 
@@ -86,11 +124,16 @@ def generate_prompt(employee_data, is_first_chat=True):
         prompt = f"""你現在是 YCM 館長，一個友善、專業的智能助手。你正在與 {employee_data['name']} 進行對話。
 
 你應該：
-1. 根據以下資訊，從中選擇一個有趣的點來延續對話
-2. 不要重複之前的開場白
-3. 直接問一個有趣的問題
-4. 保持專業但友善的態度
+1. 根據用戶的輸入和對話記錄，給出合適的回應
+2. 利用員工資料中的資訊來豐富對話
+3. 保持專業但友善的態度
 """
+
+    # 添加對話記錄
+    if recent_messages:
+        prompt += "\n最近的對話記錄：\n"
+        for role, message in recent_messages:
+            prompt += f"{role}: {message}\n"
 
     prompt += f"""
 以下是關於 {employee_data['name']} 的資訊：
@@ -115,11 +158,55 @@ def generate_prompt(employee_data, is_first_chat=True):
 """
     return prompt
 
+def handle_user_message(employee_data, user_message, conversation_memory):
+    """處理用戶的文字輸入"""
+    try:
+        # 記錄用戶訊息
+        conversation_memory.add_message(employee_data['name'], user_message, 'user')
+        
+        # 獲取最近的對話記錄
+        recent_messages = conversation_memory.get_recent_messages(employee_data['name'])
+        
+        # 生成回應
+        system_prompt = generate_prompt(employee_data, recent_messages, is_first_chat=False)
+        
+        if USE_OPENAI:
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_message}
+            ]
+            response = openai_client.chat.completions.create(
+                model="gpt-4",
+                messages=messages,
+                temperature=0.7,
+                max_tokens=300
+            )
+            ai_response = response.choices[0].message.content
+        else:
+            messages = [
+                {'role': 'system', 'content': system_prompt},
+                {'role': 'user', 'content': user_message}
+            ]
+            response = ollama.chat(
+                model='deepseek-r1:8b',
+                messages=messages
+            )
+            ai_response = response['message']['content']
+        
+        # 記錄 AI 回應
+        conversation_memory.add_message(employee_data['name'], ai_response, 'assistant')
+        
+        return ai_response
+        
+    except Exception as e:
+        print(f"處理用戶訊息時發生錯誤: {e}")
+        return "抱歉，我現在無法正常回應。請稍後再試。"
+
 def chat_with_employee(employee_data, is_first_chat=True):
     """使用選定的 LLM 與員工對話"""
     try:
         # 生成初始 prompt
-        system_prompt = generate_prompt(employee_data, is_first_chat)
+        system_prompt = generate_prompt(employee_data, is_first_chat=is_first_chat)
         
         if USE_OPENAI:
             # 使用 OpenAI API
@@ -180,6 +267,9 @@ def realtime_face_recognition():
         known_face_data = json.load(f)
     print(f"已載入人臉特徵，共 {len(known_face_data)} 人")
     
+    # 初始化對話記憶
+    conversation_memory = ConversationMemory()
+    
     # 初始化攝像頭並設置更高的分辨率
     cap = cv2.VideoCapture(0)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
@@ -198,6 +288,30 @@ def realtime_face_recognition():
     employee_cache = {}  # 快取員工資料
     chat_cooldown = {}  # 用於控制對話頻率
     active_conversations = set()  # 追踪正在進行的對話
+    
+    # 設置聊天窗口的訊息處理
+    def on_user_message(message):
+        # 找到最近檢測到的人
+        current_time = datetime.now().strftime("%H:%M:%S")
+        current_person = None
+        for person_id, last_time in recent_detections.items():
+            if (datetime.strptime(current_time, "%H:%M:%S") - 
+                datetime.strptime(last_time, "%H:%M:%S")).total_seconds() < 30:
+                current_person = person_id
+                break
+        
+        if current_person and current_person in employee_cache:
+            response = handle_user_message(
+                employee_cache[current_person], 
+                message,
+                conversation_memory
+            )
+            chat_window.show_message(response)
+        else:
+            chat_window.show_message("抱歉，我現在無法確定你是誰。請讓我看清你的臉。")
+    
+    # 連接聊天窗口的訊息信號
+    chat_window.message_sent.connect(on_user_message)
     
     # 性能優化參數
     frame_skip = 2  # 每隔幾幀處理一次
