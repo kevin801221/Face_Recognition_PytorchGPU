@@ -1,22 +1,26 @@
 import os
 import cv2
-import json
 import numpy as np
-from datetime import datetime
-import time
-import math
 import torch
-import requests
-import ollama
-import argparse
+import insightface
+from datetime import datetime
+import json
 from dotenv import load_dotenv
-from openai import OpenAI
-from insightface.app import FaceAnalysis
-from insightface.utils import face_align
+import requests
+import time
+import asyncio
+from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
 from gui.chat_window import ChatWindow
 import sys
 import sqlite3
+import threading
+import math
+from utils.speech_input import SpeechRecognizer
+import ollama
+from openai import OpenAI
+from insightface.app import FaceAnalysis
+import argparse
 
 # 載入環境變數
 load_dotenv()
@@ -258,6 +262,10 @@ def cosine_similarity(a, b):
     """計算兩個向量的餘弦相似度"""
     return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
 
+def cosine_distance(a, b):
+    """計算兩個向量的餘弦距離"""
+    return 1 - cosine_similarity(a, b)
+
 def realtime_face_recognition():
     """即時人臉識別主函數"""
     print("啟動即時人臉識別...")
@@ -277,7 +285,7 @@ def realtime_face_recognition():
     if not cap.isOpened():
         print("無法開啟攝像頭")
         return
-        
+    
     # 初始化當前執行期間的檢測記錄
     current_session_log = {}
     current_date = datetime.now().strftime("%Y/%m/%d")
@@ -289,17 +297,48 @@ def realtime_face_recognition():
     chat_cooldown = {}  # 用於控制對話頻率
     active_conversations = set()  # 追踪正在進行的對話
     
+    # 休眠模式相關變量
+    sleep_mode = False
+    last_face_position = None
+    no_face_counter = 0
+    POSITION_THRESHOLD = 50  # 人臉移動超過這個像素值就重新辨識
+    NO_FACE_THRESHOLD = 30  # 沒有檢測到人臉的幀數閾值
+    
+    # 語音識別相關
+    speech_recognizer = SpeechRecognizer()
+    speech_text_buffer = ""
+    last_speech_time = time.time()
+    SPEECH_TIMEOUT = 2.0  # 語音輸入超時時間（秒）
+    
+    def process_speech_input():
+        nonlocal speech_text_buffer, last_speech_time
+        
+        current_time = time.time()
+        if speech_text_buffer and (current_time - last_speech_time) >= SPEECH_TIMEOUT:
+            # 發送累積的文字
+            if current_person and current_person in employee_cache:
+                chat_window.input_field.setText(speech_text_buffer)
+                chat_window.send_message()
+            speech_text_buffer = ""
+    
+    def on_speech_detected(text):
+        nonlocal speech_text_buffer, last_speech_time
+        if text:
+            speech_text_buffer = text
+            last_speech_time = time.time()
+            # 更新輸入框顯示
+            chat_window.input_field.setText(speech_text_buffer)
+    
+    # 設置語音識別回調
+    speech_recognizer.on_speech_detected = on_speech_detected
+    
+    # 啟動語音識別線程
+    speech_thread = threading.Thread(target=speech_recognizer.start_listening, daemon=True)
+    speech_thread.start()
+    
     # 設置聊天窗口的訊息處理
     def on_user_message(message):
-        # 找到最近檢測到的人
-        current_time = datetime.now().strftime("%H:%M:%S")
-        current_person = None
-        for person_id, last_time in recent_detections.items():
-            if (datetime.strptime(current_time, "%H:%M:%S") - 
-                datetime.strptime(last_time, "%H:%M:%S")).total_seconds() < 30:
-                current_person = person_id
-                break
-        
+        nonlocal current_person
         if current_person and current_person in employee_cache:
             response = handle_user_message(
                 employee_cache[current_person], 
@@ -313,129 +352,120 @@ def realtime_face_recognition():
     # 連接聊天窗口的訊息信號
     chat_window.message_sent.connect(on_user_message)
     
-    # 性能優化參數
-    frame_skip = 2  # 每隔幾幀處理一次
+    # 主循環
     frame_count = 0
-    process_this_frame = True
-    
-    try:
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                print("無法讀取攝像頭畫面")
-                break
+    current_person = None
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            continue
+        
+        # 每隔幾幀處理一次
+        frame_count += 1
+        if frame_count % 2 != 0:
+            continue
             
-            frame_count += 1
-            process_this_frame = frame_count % frame_skip == 0
+        # 檢測人臉
+        faces = face_app.get(frame)
+        
+        # 更新無人臉計數器
+        if not faces:
+            no_face_counter += 1
+            if no_face_counter >= NO_FACE_THRESHOLD:
+                sleep_mode = False  # 重置休眠模式
+                last_face_position = None
+            continue
+        else:
+            no_face_counter = 0
+        
+        current_time = datetime.now().strftime("%H:%M:%S")
+        current_person = None
+        
+        # 在休眠模式下只進行位置檢查
+        if sleep_mode and faces:
+            face = faces[0]
+            current_pos = (face.bbox[0], face.bbox[1])
             
-            if process_this_frame:
-                # 縮小圖像以加快處理速度
-                small_frame = cv2.resize(frame, (0, 0), fx=0.5, fy=0.5)
+            if last_face_position:
+                dx = current_pos[0] - last_face_position[0]
+                dy = current_pos[1] - last_face_position[1]
+                distance = math.sqrt(dx*dx + dy*dy)
                 
-                # 檢測人臉
-                faces = face_app.get(small_frame)
-                current_time = datetime.now().strftime("%H:%M:%S")
-                current_time_obj = datetime.strptime(current_time, "%H:%M:%S")
+                if distance > POSITION_THRESHOLD:
+                    sleep_mode = False  # 退出休眠模式
+            
+            last_face_position = current_pos
+            
+            # 在休眠模式下使用最後識別的人
+            for person_id, last_time in recent_detections.items():
+                if (datetime.strptime(current_time, "%H:%M:%S") - 
+                    datetime.strptime(last_time, "%H:%M:%S")).total_seconds() < 30:
+                    current_person = person_id
+                    break
+        
+        # 非休眠模式下進行完整的人臉辨識
+        if not sleep_mode and faces:
+            face = faces[0]
+            current_pos = (face.bbox[0], face.bbox[1])
+            last_face_position = current_pos
+            
+            # 提取人臉特徵
+            face_feature = face.normed_embedding.tolist()
+            
+            # 尋找最匹配的人臉
+            best_match = None
+            min_distance = float('inf')
+            
+            for person_id, features in known_face_data.items():
+                for feature in features:
+                    distance = cosine_distance(face_feature, feature)
+                    if distance < min_distance:
+                        min_distance = distance
+                        best_match = person_id
+            
+            # 如果找到匹配的人臉
+            if best_match and min_distance < 0.3:
+                current_person = best_match
+                recent_detections[current_person] = current_time
                 
-                # 清理舊的檢測記錄
-                for person_id in list(recent_detections.keys()):
-                    last_detection_time = datetime.strptime(recent_detections[person_id], "%H:%M:%S")
-                    time_diff = (current_time_obj - last_detection_time).total_seconds()
-                    if time_diff > 5:  # 如果超過5秒沒有檢測到，則移除記錄
-                        del recent_detections[person_id]
-                        if person_id in active_conversations:
-                            active_conversations.remove(person_id)
-                
-                # 處理每個檢測到的人臉
-                for face in faces:
-                    # 調整邊界框以匹配原始圖像大小
-                    bbox = face.bbox.astype(int) * 2
-                    embedding = face.embedding
-                    
-                    # 使用向量化操作尋找最相似的人臉
-                    max_similarity = -1
-                    identity = "Unknown"
-                    
-                    for person_name, features in known_face_data.items():
-                        similarities = [cosine_similarity(embedding, feature) for feature in features]
-                        max_person_similarity = max(similarities)
-                        if max_person_similarity > max_similarity:
-                            max_similarity = max_person_similarity
-                            identity = person_name
-                    
-                    # 計算置信度（將相似度轉換為百分比）
-                    confidence = (max_similarity + 1) * 50  # 轉換範圍從[-1,1]到[0,100]
-                    
-                    # 根據置信度決定邊框顏色
-                    if confidence > 70:
-                        color = (0, 255, 0)  # 綠色
-                    elif confidence > 50:
-                        color = (0, 255, 255)  # 黃色
-                    else:
-                        color = (0, 0, 255)  # 紅色
-                        identity = "Unknown"
-                    
-                    # 如果是已知人臉且置信度足夠
-                    if identity != "Unknown" and confidence > 60:
-                        # 更新檢測時間
-                        recent_detections[identity] = current_time
-                        
-                        # 如果這個人不在活動對話中且已經過了冷卻時間
-                        if identity not in active_conversations and (
-                            identity not in chat_cooldown or 
-                            (current_time_obj - datetime.strptime(chat_cooldown[identity], "%H:%M:%S")).total_seconds() > 120
-                        ):
-                            # 獲取員工完整資料
-                            if identity not in employee_cache:
-                                employee_data = get_employee_data(identity)
-                                if employee_data:
-                                    employee_cache[identity] = employee_data
-                                    print(f"已獲取 {identity} 的完整資料")
+                # 如果這個人還沒有被快取
+                if current_person not in employee_cache:
+                    try:
+                        employee_data = get_employee_data(current_person)
+                        if employee_data:
+                            employee_cache[current_person] = employee_data
                             
-                            if identity in employee_cache:
-                                # 標記為正在對話中
-                                active_conversations.add(identity)
+                            # 如果這是新的對話
+                            if current_person not in active_conversations:
+                                response = chat_with_employee(employee_data, is_first_chat=True)
+                                chat_window.show_message(response)
+                                active_conversations.add(current_person)
                                 
-                                # 檢查是否是首次對話
-                                is_first_chat = identity not in chat_cooldown
-                                response = chat_with_employee(employee_cache[identity], is_first_chat)
-                                
-                                if response:
-                                    # 更新對話冷卻時間
-                                    chat_cooldown[identity] = current_time
-                                    # 顯示回應
-                                    chat_window.show_message(f"YCM館長: {response}")
-                                    # 完成對話後移除活動對話標記
-                                    active_conversations.remove(identity)
-                                    
-                                    # 記錄到日誌
-                                    detection_record = {
-                                        "time": current_time,
-                                        "identity": identity,
-                                        "confidence": confidence,
-                                        "response": response
-                                    }
-                                    current_session_log[current_date].append(detection_record)
-                    
-                    # 在畫面上標註
-                    cv2.rectangle(frame, (bbox[0], bbox[1]), (bbox[2], bbox[3]), color, 2)
-                    cv2.putText(frame, f"{identity} | {confidence:.1f}%", 
-                              (bbox[0], bbox[1] - 10), cv2.FONT_HERSHEY_SIMPLEX, 
-                              0.5, color, 2)
+                                # 進入休眠模式
+                                sleep_mode = True
+                    except Exception as e:
+                        print(f"獲取員工資料時發生錯誤: {e}")
+        
+        # 處理語音輸入
+        process_speech_input()
+        
+        # 顯示框架
+        if faces:
+            face = faces[0]
+            bbox = face.bbox.astype(int)
+            cv2.rectangle(frame, (bbox[0], bbox[1]), (bbox[2], bbox[3]), (0, 255, 0), 2)
             
-            # 顯示畫面
-            cv2.imshow('Face Recognition', frame)
-            
-            # 處理 Qt 事件
-            qt_app.processEvents()
-            
-            # 按下 'q' 退出
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
-                
-    finally:
-        cap.release()
-        cv2.destroyAllWindows()
+            if current_person:
+                cv2.putText(frame, current_person, (bbox[0], bbox[1] - 10),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
+        
+        cv2.imshow('Face Recognition', frame)
+        
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+    
+    cap.release()
+    cv2.destroyAllWindows()
 
 if __name__ == "__main__":
     realtime_face_recognition()
