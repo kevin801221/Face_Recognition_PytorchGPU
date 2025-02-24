@@ -36,7 +36,7 @@ else:
     USE_OPENAI = False
 
 # API 設置
-API_BASE_URL = "https://ddfab4235344.ngrok.app/api/employees/search/by-name"
+API_BASE_URL = "https://inai-hr.jp.ngrok.io/api/employees/search/by-name"
 
 # 初始化 Qt 應用
 qt_app = QApplication.instance()
@@ -150,14 +150,19 @@ def chat_with_employee(employee_data, is_first_chat=True):
         return None
 
 def get_employee_data(name):
-    """從本地文件獲取員工資料"""
+    """從 API 獲取員工資料"""
     try:
-        with open('employee_data.json', 'r', encoding='utf-8') as f:
-            data = json.load(f)
-            for employee in data['data']:
-                if employee['name'] == name:
-                    return employee
+        import requests
+        
+        # 發送 API 請求
+        response = requests.get(f"{API_BASE_URL}/{name}")
+        
+        if response.status_code == 200:
+            data = response.json()
+            if data.get('data') and len(data['data']) > 0:
+                return data['data'][0]
         return None
+        
     except Exception as e:
         print(f"獲取員工資料時發生錯誤: {e}")
         return None

@@ -5,5 +5,11 @@ onnxruntime-gpu
 opencv-python
 numpy
 PySide6==6.6.1
+requests>=2.31.0
 requests
 ollama
+edge-tts
+python-dotenv
+openai
+SpeechRecognition
+pyaudio
