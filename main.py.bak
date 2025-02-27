@@ -20,17 +20,17 @@ from gui.chat_window import ChatWindow
 from utils.resource_monitor import ResourceMonitor
 from utils.speech_input import SpeechRecognizer
 from utils.conversation_memory import EnhancedConversationMemory
+from utils.whisper_speech import WhisperSpeechRecognizer
+from utils.elevenlabs_tts import ElevenLabsTTS
+from utils.langgraph_conversation import LangGraphConversation, ConversationState
 
 # Services
 from services.face_service import FaceService
 from services.api_client import get_employee_data
 from services.llm_service import LLMService
 
-# 導入 ElevenLabs TTS 服務
-from utils.elevenlabs_tts import ElevenLabsTTS
-
 # Configuration
-from config import CAMERA_WIDTH, CAMERA_HEIGHT, parse_arguments
+from config import CAMERA_WIDTH, CAMERA_HEIGHT, parse_arguments, OPENAI_API_KEY, ELEVENLABS_API_KEY, ELEVENLABS_VOICE_ID, WHISPER_MODEL, LLM_MODEL
 
 def main():
     """Main application entry point"""
@@ -49,17 +49,16 @@ def main():
     chat_window = ChatWindow()
     chat_window.show()
     
-    # 先顯示測試消息
-    chat_window.show_message("系統啟動測試：請問您能看到這條消息嗎？")
+    # ?�顯示測試�???    chat_window.show_message("系統?��?測試：�??�您?��??�這�?消息?��?")
 
     # 檢查 API 密鑰
     if args.model in ["gpt4o", "gpt-4o", "gpt-4"]:
         api_key = os.getenv('OPENAI_API_KEY')
         if not api_key:
-            print("警告：找不到 OPENAI_API_KEY 環境變數！")
-            chat_window.show_message("警告: OpenAI API 密鑰未設置，系統可能無法正常工作。")
+            print("警�?：找不到 OPENAI_API_KEY ?��?變數�?)
+            chat_window.show_message("警�?: OpenAI API 密鑰?�設置�?系統?�能?��?�?��工�???)
     
-    chat_window.show_message(f"系統啟動: 使用 {args.model} 模型，如果您看到此消息，界面正常工作。")
+    chat_window.show_message(f"系統?��?: 使用 {args.model} 模�?，�??�您?�到此�??��??�面�?��工�???)
     
     # Initialize resource monitor
     resource_monitor = ResourceMonitor(target_cpu_percent=args.cpu_limit)
@@ -74,22 +73,24 @@ def main():
     # Initialize face service
     face_service = FaceService()
     
-    # Initialize speech recognizer
-    speech_recognizer = SpeechRecognizer()
-    
-    # Initialize ElevenLabs TTS service
-    if args.use_voice:
-        elevenlabs_tts = ElevenLabsTTS()
-        if elevenlabs_tts.initialized:
-            chat_window.show_message("語音合成服務已啟用，使用 ElevenLabs TTS。")
-        else:
-            chat_window.show_message("警告: ElevenLabs TTS 服務初始化失敗。")
-            elevenlabs_tts = None
+    # ?��??��??��???    if args.use_voice:
+        # 使用 Whisper ?��?語音識別
+        whisper_recognizer = WhisperSpeechRecognizer(api_key=OPENAI_API_KEY, model=WHISPER_MODEL)
+        # 使用 ElevenLabs ?��?語音?��?
+        elevenlabs_tts = ElevenLabsTTS(api_key=ELEVENLABS_API_KEY, voice_id=ELEVENLABS_VOICE_ID)
+        chat_window.show_message("語音?��?已�??��?使用 Whisper ?��?語音識別，ElevenLabs ?��?語音?��???)
     else:
+        # 使用默�??��??��???        whisper_recognizer = None
         elevenlabs_tts = None
     
-    # Initialize LangGraph conversation
-    langgraph_conversation = None  # 暫時禁用 LangGraph
+    # ?��??�傳統�??��??�器（�??��??��?
+    speech_recognizer = SpeechRecognizer()
+    
+    # ?��???LangGraph 對話管�???    if args.use_langgraph:
+        langgraph_conversation = LangGraphConversation(model_name=LLM_MODEL, api_key=OPENAI_API_KEY)
+        chat_window.show_message("LangGraph 對話管�??�已?�用??)
+    else:
+        langgraph_conversation = None
     
     # Feature matching queue
     feature_queue = Queue()
@@ -104,6 +105,7 @@ def main():
         llm_service=llm_service,
         face_service=face_service,
         speech_recognizer=speech_recognizer,
+        whisper_recognizer=whisper_recognizer,
         elevenlabs_tts=elevenlabs_tts,
         langgraph_conversation=langgraph_conversation,
         feature_queue=feature_queue,
@@ -121,18 +123,19 @@ def realtime_face_recognition(
     llm_service, 
     face_service, 
     speech_recognizer, 
+    whisper_recognizer,
     elevenlabs_tts,
     langgraph_conversation,
     feature_queue, 
     result_queue
 ):
     """Real-time face recognition main function"""
-    print("啟動即時人臉識別...")
+    print("?��??��?人�?識別...")
     
     # Load face features
     known_face_data = face_service.load_face_features()
     if not known_face_data:
-        print("無法加載人臉特徵，系統將無法識別用戶")
+        print("?��??��?人�??�徵，系統�??��?識別?�戶")
     
     # Initialize camera
     cap = cv2.VideoCapture(0)
@@ -141,7 +144,7 @@ def realtime_face_recognition(
     cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Reduce buffer to decrease latency
     
     if not cap.isOpened():
-        print("無法開啟攝像頭")
+        print("?��??��??��???)
         return
     
     # Initialize variables for main loop
@@ -180,7 +183,7 @@ def realtime_face_recognition(
                 else:
                     time.sleep(0.01)
             except Exception as e:
-                print(f"特徵比對錯誤: {e}")
+                print(f"?�徵比�??�誤: {e}")
                 time.sleep(0.1)
     
     # Start feature matching thread
@@ -192,18 +195,23 @@ def realtime_face_recognition(
     last_speech_time = time.time()
     SPEECH_TIMEOUT = 2.0
     
+    # ?��???LangGraph ?�??    if langgraph_conversation and langgraph_conversation.initialized:
+        langgraph_state = ConversationState().to_dict()
+    else:
+        langgraph_state = None
+    
     def process_speech_input():
         nonlocal speech_text_buffer, last_speech_time
         
         current_time = time.time()
         if speech_text_buffer and (current_time - last_speech_time) >= SPEECH_TIMEOUT:
             if current_person:
-                print(f"自動發送語音輸入: {speech_text_buffer}")
+                print(f"?��??�送�??�輸?? {speech_text_buffer}")
                 chat_window.input_field.setText(speech_text_buffer)
                 chat_window.send_message()
                 speech_text_buffer = ""
             else:
-                print("未檢測到用戶，無法發送語音輸入")
+                print("?�檢測到?�戶，無法發?��??�輸??)
     
     def on_speech_detected(text):
         nonlocal speech_text_buffer, last_speech_time
@@ -212,53 +220,101 @@ def realtime_face_recognition(
             last_speech_time = time.time()
             chat_window.input_field.setText(speech_text_buffer)
     
-    # Set speech recognition callback
+    # 設置?�統語音識別?�調
     speech_recognizer.on_speech_detected = on_speech_detected
     
-    # Start speech recognition thread
-    speech_thread = threading.Thread(target=speech_recognizer.start_listening, daemon=True)
-    speech_thread.start()
+    # 設置 Whisper 語音識別?�調（�??��??��?
+    if whisper_recognizer and whisper_recognizer.initialized:
+        whisper_recognizer.on_speech_detected = on_speech_detected
+        # ?��? Whisper 語音識別線�?
+        whisper_thread = threading.Thread(target=whisper_recognizer.start_listening, daemon=True)
+        whisper_thread.start()
+        print("Whisper 語音識別?��?已�???)
+    else:
+        # ?��??�統語音識別線�?
+        speech_thread = threading.Thread(target=speech_recognizer.start_listening, daemon=True)
+        speech_thread.start()
+        print("?�統語音識別?��?已�???)
+    
+    # ?��? LangGraph 對話管�??��?程�?如�??�用�?    if langgraph_conversation and langgraph_conversation.initialized:
+        print("LangGraph 對話管�??�已?��?")
     
     # Set chat window message handler
     def on_user_message(message):
-        nonlocal current_person, employee_cache
-        print(f"收到用戶消息: {message}")  # 添加日誌
+        nonlocal current_person, employee_cache, langgraph_state
+        print(f"?�到?�戶消息: {message}")  # 添�??��?
         
-        # 測試直接回應，檢查界面更新是否正常
-        chat_window.show_message(f"收到消息: {message}，正在處理...")
+        # 測試?�接?��?，檢?��??�更?�是?�正�?        chat_window.show_message(f"?�到消息: {message}，正?��???..")
         
-        # 正常回應邏輯
-        if current_person and current_person in employee_cache:
+        # 如�??�用�?LangGraph，使??LangGraph ?��?消息
+        if langgraph_conversation and langgraph_conversation.initialized and langgraph_state:
             try:
-                # 使用傳統方式處理消息
-                response = llm_service.handle_user_message(
-                    employee_cache[current_person],
+                # 添�??�戶消息??LangGraph ?�??                langgraph_state = langgraph_conversation.add_user_message(langgraph_state, message)
+                
+                # 設置?��??�戶信息
+                if current_person and current_person in employee_cache:
+                    employee_data = employee_cache[current_person]
+                    langgraph_state["employee_data"] = employee_data
+                    langgraph_state["current_user"] = current_person
+                
+                # ?��?消息
+                response, audio_path = langgraph_conversation.process_message(
                     message,
-                    conversation_memory
+                    employee_data=employee_cache.get(current_person, {}),
+                    current_user=current_person
                 )
-                print(f"AI 回應: {response}")
+                
+                print(f"AI ?��?: {response}")  # 添�??��?
                 chat_window.show_message(response)
                 
-                # 使用 ElevenLabs TTS 合成語音
-                if elevenlabs_tts and args.use_voice:
-                    audio_path = elevenlabs_tts.synthesize_speech(response)
-                    if audio_path:
-                        print(f"語音合成完成，保存到: {audio_path}")
-                        # 播放語音
-                        import pygame
-                        pygame.mixer.init()
-                        pygame.mixer.music.load(audio_path)
-                        pygame.mixer.music.play()
+                # 如�??��??��??��??�放語音
+                if audio_path and elevenlabs_tts and elevenlabs_tts.initialized:
+                    # 使用系統默�??�放?�播?��???                    import subprocess
+                    try:
+                        subprocess.Popen(['start', audio_path], shell=True)
+                    except Exception as e:
+                        print(f"?�放語音?�出?? {e}")
             except Exception as e:
-                print(f"處理消息時出錯: {e}")
-                chat_window.show_message(f"處理消息時出錯: {e}")
+                print(f"LangGraph ?��?消息?�出?? {e}")
+                chat_window.show_message(f"?��?消息?�出?? {e}")
+                
+                # 如�? LangGraph ?��?失�?，�??�?�傳統�??�方�?                fallback_to_traditional = True
+            else:
+                fallback_to_traditional = False
         else:
-            chat_window.show_message("抱歉，我現在無法確定你是誰。請讓我看清你的臉。")
-    
-    # 確保正確連接信號
+            fallback_to_traditional = True
+        
+        # 如�??�要�??�?�傳統�??�方式�??��?LangGraph ?��???        if fallback_to_traditional:
+            # �?��?��??�輯
+            if current_person and current_person in employee_cache:
+                try:
+                    response = llm_service.handle_user_message(
+                        employee_cache[current_person],
+                        message,
+                        conversation_memory
+                    )
+                    print(f"AI ?��?: {response}")  # 添�??��?
+                    chat_window.show_message(response)
+                    
+                    # 如�??�用了�??��??��?使用 ElevenLabs ?��?語音
+                    if elevenlabs_tts and elevenlabs_tts.initialized:
+                        audio_path = elevenlabs_tts.synthesize_speech(response)
+                        if audio_path:
+                            # 使用系統默�??�放?�播?��???                            import subprocess
+                            try:
+                                subprocess.Popen(['start', audio_path], shell=True)
+                            except Exception as e:
+                                print(f"?�放語音?�出?? {e}")
+                except Exception as e:
+                    print(f"?��?消息?�出?? {e}")
+                    chat_window.show_message(f"?��?消息?�出?? {e}")
+            else:
+                chat_window.show_message("?��?，�??�在?��?確�?你是誰。�?讓�??��?你�??��?)
+
+    # 確�?�?��??��信�?
     chat_window.message_sent.connect(on_user_message)
     
-    print("即時人臉識別系統已啟動...")
+    print("?��?人�?識別系統已�???..")
     
     # Main loop
     while True:
@@ -267,7 +323,7 @@ def realtime_face_recognition(
             
             ret, frame = cap.read()
             if not ret:
-                print("無法讀取影像")
+                print("?��?讀?�影??)
                 time.sleep(0.1)
                 continue
             
@@ -275,7 +331,7 @@ def realtime_face_recognition(
             fps_counter += 1
             if time.time() - fps_start_time >= 5:
                 current_fps = fps_counter / (time.time() - fps_start_time)
-                print(f"目前 FPS: {current_fps:.1f}, CPU 使用率: {resource_monitor.current_cpu_percent:.1f}%")
+                print(f"?��? FPS: {current_fps:.1f}, CPU 使用?? {resource_monitor.current_cpu_percent:.1f}%")
                 fps_counter = 0
                 fps_start_time = time.time()
             
@@ -338,17 +394,15 @@ def realtime_face_recognition(
             # In sleep mode, only check for position changes
             if sleep_mode and faces:
                 face = faces[0]
-                # 檢查 face 的結構類型，根據不同的結構獲取 bbox
+                # 檢查 face ?��?構�??��??��?不�??��?構獲??bbox
                 if hasattr(face, 'bbox'):
-                    # InsightFace 直接返回的物件
-                    current_pos = (face.bbox[0], face.bbox[1])
+                    # InsightFace ?�接返�??�物�?                    current_pos = (face.bbox[0], face.bbox[1])
                 elif isinstance(face, dict) and 'bbox' in face:
-                    # 以字典形式封裝的物件
+                    # 以�??�形式�?裝�??�件
                     current_pos = (face['bbox'][0], face['bbox'][1])
                 else:
-                    # 未能識別的結構，使用默認值
-                    current_pos = (0, 0)
-                    print("警告: 無法識別人臉結構類型")
+                    # ?�能識別?��?構�?使用默�???                    current_pos = (0, 0)
+                    print("警�?: ?��?識別人�?結�?類�?")
                 
                 if last_face_position:
                     dx = current_pos[0] - last_face_position[0]
@@ -356,7 +410,7 @@ def realtime_face_recognition(
                     distance = np.sqrt(dx*dx + dy*dy)
                     
                     if distance > POSITION_THRESHOLD:
-                        print("檢測到顯著移動，退出休眠模式")
+                        print("檢測?�顯?�移?��??�?��??�模�?)
                         sleep_mode = False
                 
                 last_face_position = current_pos
@@ -372,23 +426,20 @@ def realtime_face_recognition(
             if not sleep_mode and faces:
                 face = faces[0]
                 
-                # 檢查 face 的結構類型，根據不同的結構獲取資訊
-                if hasattr(face, 'bbox') and hasattr(face, 'normed_embedding'):
-                    # InsightFace 直接返回的物件
-                    current_pos = (face.bbox[0], face.bbox[1])
+                # 檢查 face ?��?構�??��??��?不�??��?構獲?��?�?                if hasattr(face, 'bbox') and hasattr(face, 'normed_embedding'):
+                    # InsightFace ?�接返�??�物�?                    current_pos = (face.bbox[0], face.bbox[1])
                     face_feature = face.normed_embedding
                     bbox = face.bbox.astype(int)
                 elif isinstance(face, dict):
-                    # 以字典形式封裝的物件
+                    # 以�??�形式�?裝�??�件
                     current_pos = (face['bbox'][0], face['bbox'][1])
                     face_feature = face['embedding'] if 'embedding' in face else None
                     bbox = face['bbox'].astype(int) if 'bbox' in face else np.array([0, 0, 100, 100])
                 else:
-                    # 未能識別的結構，使用默認值
-                    current_pos = (0, 0)
+                    # ?�能識別?��?構�?使用默�???                    current_pos = (0, 0)
                     face_feature = None
                     bbox = np.array([0, 0, 100, 100])
-                    print("警告: 無法識別人臉結構類型")
+                    print("警�?: ?��?識別人�?結�?類�?")
                 
                 last_face_position = current_pos
                 
@@ -404,48 +455,36 @@ def realtime_face_recognition(
                         
                         # If a match is found
                         if best_match and min_distance < 0.3:
-                            print(f"識別到用戶: {best_match}, 距離: {min_distance:.4f}")
+                            print(f"識別?�用?? {best_match}, 距離: {min_distance:.4f}")
                             current_person = best_match
                             recent_detections[current_person] = current_time
                             
                             # If this person is not cached
                             if current_person not in employee_cache:
                                 try:
-                                    print(f"嘗試獲取員工資料: {current_person}")
+                                    print(f"?�試?��??�工資�?: {current_person}")
                                     employee_data = get_employee_data(current_person)
                                     if employee_data:
-                                        print(f"成功獲取員工資料: {employee_data['name']}")
+                                        print(f"?��??��??�工資�?: {employee_data['name']}")
                                         employee_cache[current_person] = employee_data
                                         
                                         # If this is a new conversation
                                         if current_person not in active_conversations:
-                                            print("開始新對話")
+                                            print("?��??��?�?)
                                             
                                             # Start a new conversation in a separate thread
                                             def start_conversation():
-                                                # 使用傳統方式處理初始對話
                                                 response = llm_service.chat_with_employee(
                                                     employee_data,
                                                     is_first_chat=True
                                                 )
                                                 if response:
                                                     chat_window.show_message(response)
-                                                    
-                                                    # 使用 ElevenLabs TTS 合成語音
-                                                    if elevenlabs_tts and args.use_voice:
-                                                        audio_path = elevenlabs_tts.synthesize_speech(response)
-                                                        if audio_path:
-                                                            print(f"語音合成完成，保存到: {audio_path}")
-                                                            # 播放語音
-                                                            import pygame
-                                                            pygame.mixer.init()
-                                                            pygame.mixer.music.load(audio_path)
-                                                            pygame.mixer.music.play()
                                             
                                             threading.Thread(target=start_conversation, daemon=True).start()
                                             active_conversations.add(current_person)
                                 except Exception as e:
-                                    print(f"獲取員工資料時發生錯誤: {e}")
+                                    print(f"?��??�工資�??�發?�錯�? {e}")
                             
                             # Generate conversation summary every 10 minutes
                             if current_person in active_conversations:
@@ -457,7 +496,7 @@ def realtime_face_recognition(
                                         daemon=True
                                     ).start()
                         else:
-                            print(f"無法識別用戶，最小距離: {min_distance:.4f}")
+                            print(f"?��?識別?�戶，�?小�??? {min_distance:.4f}")
                             # Only reset current user when distance is very large
                             if min_distance > 0.6:
                                 current_person = None
@@ -469,17 +508,15 @@ def realtime_face_recognition(
             if faces:
                 face = faces[0]
                 
-                # 檢查 face 的結構類型，根據不同的結構獲取 bbox
+                # 檢查 face ?��?構�??��??��?不�??��?構獲??bbox
                 if hasattr(face, 'bbox'):
-                    # InsightFace 直接返回的物件
-                    bbox = face.bbox.astype(int)
+                    # InsightFace ?�接返�??�物�?                    bbox = face.bbox.astype(int)
                 elif isinstance(face, dict) and 'bbox' in face:
-                    # 以字典形式封裝的物件
+                    # 以�??�形式�?裝�??�件
                     bbox = face['bbox'].astype(int)
                 else:
-                    # 未能識別的結構，使用默認值
-                    bbox = np.array([0, 0, 100, 100])
-                    print("警告: 無法識別人臉結構類型")
+                    # ?�能識別?��?構�?使用默�???                    bbox = np.array([0, 0, 100, 100])
+                    print("警�?: ?��?識別人�?結�?類�?")
                 
                 # Choose color based on recognition result
                 if current_person:
@@ -524,7 +561,7 @@ def realtime_face_recognition(
             # Calculate and display processing time
             process_time = time.time() - loop_start
             if process_time > 0.1:
-                print(f"警告: 處理時間較長 {process_time:.3f}秒")
+                print(f"警�?: ?��??��?較長 {process_time:.3f}�?)
             
             cv2.imshow('Face Recognition', frame)
             
@@ -536,7 +573,7 @@ def realtime_face_recognition(
                 time.sleep(0.01)
                 
         except Exception as e:
-            print(f"主循環錯誤: {e}")
+            print(f"主循?�錯�? {e}")
             import traceback
             traceback.print_exc()
             time.sleep(0.1)
@@ -547,7 +584,7 @@ def realtime_face_recognition(
     resource_monitor.stop_monitoring()
     speech_recognizer.stop_listening()
     
-    print("即時人臉識別系統已關閉")
+    print("?��?人�?識別系統已�???)
 
 def train_face(name=None):
     """Function to train a new face for recognition"""

@@ -53,6 +53,12 @@ def parse_arguments():
         help=f'跳過幀數量 (預設: 每{DEFAULT_SKIP_FRAMES+1}幀處理1幀)'
     )
     
+    parser.add_argument(
+        '--use-voice',
+        action='store_true',
+        help='啟用語音功能 (使用 ElevenLabs 進行語音合成)'
+    )
+    
     args = parser.parse_args()
     
     # Set camera dimensions based on resolution

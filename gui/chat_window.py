@@ -622,8 +622,8 @@ class ChatWindow(QMainWindow):
         """
         self.add_message_bubble(message, is_user=False)
         
-        # 播放語音
-        asyncio.run(self.text_to_speech(message))
+        # 暫時禁用 Google TTS，因為我們已經在 main.py 中使用 ElevenLabs TTS
+        # asyncio.run(self.text_to_speech(message))
         
     def set_status(self, status):
         """設置狀態
