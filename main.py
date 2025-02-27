@@ -77,16 +77,60 @@ def main():
     # Initialize speech recognizer
     speech_recognizer = SpeechRecognizer()
     
-    # Initialize ElevenLabs TTS service
+    # Initialize TTS services
+    elevenlabs_tts = None
+    chatgpt_tts = None
+    inai_tts = None
+    
     if args.use_voice:
-        elevenlabs_tts = ElevenLabsTTS()
-        if elevenlabs_tts.initialized:
-            chat_window.show_message("語音合成服務已啟用，使用 ElevenLabs TTS。")
-        else:
-            chat_window.show_message("警告: ElevenLabs TTS 服務初始化失敗。")
+        try:
+            # 優先嘗試初始化 ElevenLabs TTS 服務
+            from utils.elevenlabs_tts import ElevenLabsTTS
+            elevenlabs_tts = ElevenLabsTTS()
+            if not elevenlabs_tts.initialized:
+                elevenlabs_tts = None
+                print("ElevenLabs TTS 服務初始化失敗，嘗試使用其他 TTS 服務")
+        except Exception as e:
+            print(f"初始化 ElevenLabs TTS 時出錯: {e}")
             elevenlabs_tts = None
+        else:
+            chatgpt_tts = None
+            inai_tts = None
+            print("使用 ElevenLabs TTS 服務")
+            
+        # 如果 ElevenLabs TTS 初始化失敗，嘗試使用 ChatGPT TTS
+        if elevenlabs_tts is None:
+            try:
+                # 嘗試初始化 ChatGPT TTS 服務
+                from services.chatgpt_tts_service import ChatGPTTTSService
+                chatgpt_tts = ChatGPTTTSService()
+                if not chatgpt_tts.initialized:
+                    chatgpt_tts = None
+                    print("ChatGPT TTS 服務初始化失敗，嘗試使用 Inai TTS 服務")
+            except Exception as e:
+                print(f"初始化 ChatGPT TTS 服務時出錯: {e}")
+                chatgpt_tts = None
+            else:
+                inai_tts = None
+                print("使用 ChatGPT TTS 服務")
+            
+            # 如果 ElevenLabs TTS 和 ChatGPT TTS 都初始化失敗，嘗試使用 Inai TTS
+            if chatgpt_tts is None:
+                try:
+                    from services.inai_tts_service import InaiTTSService
+                    inai_tts = InaiTTSService()
+                    if not inai_tts.initialized:
+                        inai_tts = None
+                        print("警告: Inai TTS 初始化失敗。語音功能將不可用。")
+                except Exception as e:
+                    print(f"初始化 Inai TTS 服務時出錯: {e}")
+                    inai_tts = None
+                else:
+                    print("使用 Inai TTS 服務")
     else:
         elevenlabs_tts = None
+        chatgpt_tts = None
+        inai_tts = None
     
     # Initialize LangGraph conversation
     langgraph_conversation = None  # 暫時禁用 LangGraph
@@ -105,6 +149,8 @@ def main():
         face_service=face_service,
         speech_recognizer=speech_recognizer,
         elevenlabs_tts=elevenlabs_tts,
+        inai_tts=inai_tts,
+        chatgpt_tts=chatgpt_tts,
         langgraph_conversation=langgraph_conversation,
         feature_queue=feature_queue,
         result_queue=result_queue
@@ -122,6 +168,8 @@ def realtime_face_recognition(
     face_service, 
     speech_recognizer, 
     elevenlabs_tts,
+    inai_tts,
+    chatgpt_tts,
     langgraph_conversation,
     feature_queue, 
     result_queue
@@ -264,8 +312,26 @@ def realtime_face_recognition(
                 print(f"AI 回應: {response}")
                 chat_window.show_message(response)
                 
-                # 使用 ElevenLabs TTS 合成語音
-                if elevenlabs_tts and args.use_voice:
+                # 使用 Inai TTS 或 ElevenLabs TTS 合成語音
+                if chatgpt_tts and args.use_voice:
+                    audio_path = chatgpt_tts.synthesize_speech(response)
+                    if audio_path:
+                        print(f"語音合成完成，保存到: {audio_path}")
+                        # 播放語音
+                        import pygame
+                        pygame.mixer.init()
+                        pygame.mixer.music.load(audio_path)
+                        pygame.mixer.music.play()
+                elif inai_tts and args.use_voice:
+                    audio_path = inai_tts.synthesize_speech(response)
+                    if audio_path:
+                        print(f"語音合成完成，保存到: {audio_path}")
+                        # 播放語音
+                        import pygame
+                        pygame.mixer.init()
+                        pygame.mixer.music.load(audio_path)
+                        pygame.mixer.music.play()
+                elif elevenlabs_tts and args.use_voice:
                     audio_path = elevenlabs_tts.synthesize_speech(response)
                     if audio_path:
                         print(f"語音合成完成，保存到: {audio_path}")
@@ -396,6 +462,7 @@ def realtime_face_recognition(
             # In sleep mode, only check for position changes
             if sleep_mode and faces:
                 face = faces[0]
+                
                 # 檢查 face 的結構類型，根據不同的結構獲取 bbox
                 if hasattr(face, 'bbox'):
                     # InsightFace 直接返回的物件
@@ -509,9 +576,27 @@ def realtime_face_recognition(
                                                     if response:
                                                         chat_window.show_message(response)
                                                         
-                                                        # 使用 ElevenLabs TTS 合成語音
-                                                        if elevenlabs_tts and args.use_voice:
+                                                        # 使用 Inai TTS 或 ElevenLabs TTS 合成語音
+                                                        if inai_tts and args.use_voice:
+                                                            audio_path = inai_tts.synthesize_speech(response)
+                                                            if audio_path:
+                                                                print(f"語音合成完成，保存到: {audio_path}")
+                                                                # 播放語音
+                                                                import pygame
+                                                                pygame.mixer.init()
+                                                                pygame.mixer.music.load(audio_path)
+                                                                pygame.mixer.music.play()
+                                                        elif elevenlabs_tts and args.use_voice:
                                                             audio_path = elevenlabs_tts.synthesize_speech(response)
+                                                            if audio_path:
+                                                                print(f"語音合成完成，保存到: {audio_path}")
+                                                                # 播放語音
+                                                                import pygame
+                                                                pygame.mixer.init()
+                                                                pygame.mixer.music.load(audio_path)
+                                                                pygame.mixer.music.play()
+                                                        elif chatgpt_tts and args.use_voice:
+                                                            audio_path = chatgpt_tts.synthesize_speech(response)
                                                             if audio_path:
                                                                 print(f"語音合成完成，保存到: {audio_path}")
                                                                 # 播放語音
