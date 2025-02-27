@@ -230,11 +230,36 @@ def realtime_face_recognition(
         # 正常回應邏輯
         if current_person and current_person in employee_cache:
             try:
-                # 使用傳統方式處理消息
-                response = llm_service.handle_user_message(
+                # 檢查是否需要搜索最新資訊
+                need_search = check_if_need_search(message)
+                search_results = None
+                
+                # 如果需要搜索，使用 Tavily 服務
+                if need_search:
+                    try:
+                        from services.tavily_service import TavilyService
+                        tavily_service = TavilyService()
+                        if tavily_service.initialized:
+                            print(f"使用 Tavily 搜索: '{message}'")
+                            search_result = tavily_service.search(message)
+                            print(f"Tavily 原始回應: {search_result}")
+                            if search_result and "results" in search_result:
+                                search_results = search_result["results"]
+                                print(f"搜索結果: {len(search_results)} 項")
+                                # 打印搜索結果摘要
+                                for i, result in enumerate(search_results[:2], 1):
+                                    print(f"  結果 {i}: {result.get('title', '無標題')[:50]}...")
+                            else:
+                                print("未找到搜索結果")
+                    except Exception as e:
+                        print(f"Tavily 搜索錯誤: {e}")
+                
+                # 使用傳統方式處理消息，但加入搜索結果
+                response = llm_service.handle_user_message_with_search(
                     employee_cache[current_person],
                     message,
-                    conversation_memory
+                    conversation_memory,
+                    search_results
                 )
                 print(f"AI 回應: {response}")
                 chat_window.show_message(response)
@@ -254,6 +279,39 @@ def realtime_face_recognition(
                 chat_window.show_message(f"處理消息時出錯: {e}")
         else:
             chat_window.show_message("抱歉，我現在無法確定你是誰。請讓我看清你的臉。")
+    
+    # 檢查是否需要搜索最新資訊
+    def check_if_need_search(message):
+        # 檢查是否包含問題關鍵詞
+        question_keywords = ["什麼", "如何", "為什麼", "怎麼", "哪裡", "誰", "何時", "多少"]
+        
+        # 檢查是否包含搜索關鍵詞或時間關鍵詞
+        search_keywords = ["最新", "新聞", "資訊", "消息", "查詢", "搜索", "了解", "資料", "現況", "情況", "發展", "趨勢", "技術", "科技", "AI", "人工智能"]
+        time_keywords = ["今天", "現在", "最近", "昨天", "明天", "本週", "本月", "今年", "2025", "2024", "未來"]
+        
+        # 檢查是否是一個問句
+        is_question = "?" in message or "？" in message or any(kw in message for kw in question_keywords)
+        
+        # 檢查是否包含搜索關鍵詞或時間關鍵詞
+        has_search_intent = any(kw in message for kw in search_keywords)
+        has_time_intent = any(kw in message for kw in time_keywords)
+        
+        # 如果是問句並且包含搜索關鍵詞或時間關鍵詞，則認為有搜索意圖
+        should_search = is_question and (has_search_intent or has_time_intent)
+        
+        # 如果消息中明確提到 2025 年或未來，強制啟用搜索
+        if "2025" in message or "未來" in message or "將來" in message:
+            should_search = True
+            print("檢測到未來相關關鍵詞，強制啟用搜索")
+            
+        # 如果消息中提到 AI 或技術發展，也啟用搜索
+        if ("AI" in message or "人工智能" in message or "技術" in message or "科技" in message) and ("發展" in message or "趨勢" in message):
+            should_search = True
+            print("檢測到技術發展相關關鍵詞，強制啟用搜索")
+        
+        print(f"檢查搜索意圖: '{message}' -> {should_search} (問句: {is_question}, 搜索關鍵詞: {has_search_intent}, 時間關鍵詞: {has_time_intent})")
+        
+        return should_search
     
     # 確保正確連接信號
     chat_window.message_sent.connect(on_user_message)
@@ -423,24 +481,44 @@ def realtime_face_recognition(
                                             
                                             # Start a new conversation in a separate thread
                                             def start_conversation():
-                                                # 使用傳統方式處理初始對話
-                                                response = llm_service.chat_with_employee(
-                                                    employee_data,
-                                                    is_first_chat=True
-                                                )
-                                                if response:
-                                                    chat_window.show_message(response)
-                                                    
-                                                    # 使用 ElevenLabs TTS 合成語音
-                                                    if elevenlabs_tts and args.use_voice:
-                                                        audio_path = elevenlabs_tts.synthesize_speech(response)
-                                                        if audio_path:
-                                                            print(f"語音合成完成，保存到: {audio_path}")
-                                                            # 播放語音
+                                                # 嘗試使用 LangGraph 處理初始對話
+                                                if langgraph_conversation and langgraph_conversation.initialized:
+                                                    print("使用 LangGraph 開始新對話...")
+                                                    response, audio_path = langgraph_conversation.process_message(
+                                                        "你好",  # 初始問候
+                                                        employee_data,
+                                                        current_person,
+                                                        is_first_chat=True
+                                                    )
+                                                    if response:
+                                                        chat_window.show_message(response)
+                                                        
+                                                        # 播放語音（如果有）
+                                                        if audio_path and args.use_voice:
+                                                            print(f"播放語音: {audio_path}")
                                                             import pygame
                                                             pygame.mixer.init()
                                                             pygame.mixer.music.load(audio_path)
                                                             pygame.mixer.music.play()
+                                                else:
+                                                    # 使用傳統方式處理初始對話
+                                                    response = llm_service.chat_with_employee(
+                                                        employee_data,
+                                                        is_first_chat=True
+                                                    )
+                                                    if response:
+                                                        chat_window.show_message(response)
+                                                        
+                                                        # 使用 ElevenLabs TTS 合成語音
+                                                        if elevenlabs_tts and args.use_voice:
+                                                            audio_path = elevenlabs_tts.synthesize_speech(response)
+                                                            if audio_path:
+                                                                print(f"語音合成完成，保存到: {audio_path}")
+                                                                # 播放語音
+                                                                import pygame
+                                                                pygame.mixer.init()
+                                                                pygame.mixer.music.load(audio_path)
+                                                                pygame.mixer.music.play()
                                             
                                             threading.Thread(target=start_conversation, daemon=True).start()
                                             active_conversations.add(current_person)

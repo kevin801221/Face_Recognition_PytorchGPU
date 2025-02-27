@@ -46,6 +46,17 @@ class TavilyService:
             "X-Tavily-API-Key": self.api_key
         }
         
+        # 如果查詢中包含 2025 年，修改查詢以獲取更相關的結果
+        original_query = query
+        if "2025" in query:
+            # 添加更多關鍵詞以幫助找到相關內容
+            query = f"{query} future trend prediction forecast 2024 2025"
+            print(f"修改查詢: '{original_query}' -> '{query}'")
+            
+            # 使用高級搜索深度
+            search_depth = "advanced"
+            max_results = 10  # 增加結果數量
+        
         data = {
             "query": query,
             "search_depth": search_depth,
@@ -68,6 +79,20 @@ class TavilyService:
                 result = response.json()
                 process_time = time.time() - start_time
                 print(f"Tavily 搜索完成，耗時: {process_time:.2f}秒，找到 {len(result.get('results', []))} 個結果")
+                
+                # 如果沒有結果，嘗試使用不同的查詢
+                if len(result.get('results', [])) == 0 and "2025" in original_query:
+                    print("未找到結果，嘗試使用替代查詢...")
+                    # 使用更通用的未來預測查詢
+                    alternative_query = original_query.replace("2025", "future trends predictions")
+                    data["query"] = alternative_query
+                    print(f"替代查詢: '{alternative_query}'")
+                    
+                    response = requests.post(url, json=data, headers=headers)
+                    if response.status_code == 200:
+                        result = response.json()
+                        print(f"替代查詢完成，找到 {len(result.get('results', []))} 個結果")
+                
                 return result
             else:
                 print(f"Tavily 搜索錯誤: {response.status_code}, {response.text}")

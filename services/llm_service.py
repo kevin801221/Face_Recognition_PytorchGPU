@@ -184,3 +184,94 @@ class LLMService:
         except Exception as e:
             print(f"處理用戶訊息時發生錯誤: {e}")
             return "抱歉，我現在無法正常回應。請稍後再試。"
+    
+    def handle_user_message_with_search(self, employee_data, user_message, conversation_memory, search_results=None):
+        """處理用戶消息並生成回應，可選擇性地包含搜索結果
+        
+        Args:
+            employee_data: 員工數據
+            user_message: 用戶消息
+            conversation_memory: 對話記憶
+            search_results: 搜索結果（可選）
+            
+        Returns:
+            str: AI 回應
+        """
+        try:
+            # 計算消息重要性
+            importance = conversation_memory.calculate_message_importance(user_message)
+            
+            # 記錄用戶消息
+            conversation_memory.add_message(
+                employee_data['name'], 
+                user_message, 
+                'user',
+                importance
+            )
+            
+            # 獲取最近的對話歷史
+            recent_messages = conversation_memory.get_recent_messages(employee_data['name'])
+            
+            # 生成系統提示
+            system_prompt = self.generate_prompt(employee_data, recent_messages, is_first_chat=False)
+            
+            # 添加當前時間信息
+            current_date = datetime.now().strftime('%Y年%m月%d日')
+            time_info = f"\n\n重要提示：當前時間是 {current_date}。你必須基於這個時間點回答問題，不要說你的知識截止於較早的時間。"
+            system_prompt += time_info
+            
+            # 如果有搜索結果，添加到系統提示中
+            if search_results:
+                search_info = "\n\n以下是關於用戶問題的最新資訊（來自即時網絡搜索）：\n\n"
+                for i, result in enumerate(search_results, 1):
+                    search_info += f"{i}. {result.get('title', '未知標題')}\n"
+                    search_info += f"   來源: {result.get('url', '未知來源')}\n"
+                    search_info += f"   內容: {result.get('content', '未提供內容')[:300]}...\n\n"
+                
+                system_prompt += search_info
+                system_prompt += "\n你必須使用以上搜索結果來回答用戶的問題。這些是最新的資訊，比你的訓練數據更新。"
+                system_prompt += "\n如果用戶詢問2025年的情況，你必須基於上述搜索結果回答，不要說你的知識截止於2023年或更早。"
+                
+                print(f"添加了 {len(search_results)} 條搜索結果到系統提示中")
+            else:
+                print("沒有搜索結果添加到系統提示中")
+                
+            print(f"系統提示長度: {len(system_prompt)} 字符")
+            
+            # 生成回應
+            start_time = time.time()
+            if self.use_openai:
+                messages = [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_message}
+                ]
+                response = self.openai_client.chat.completions.create(
+                    model=self.model_name if self.model_name != "gpt4o" else "gpt-4o",
+                    messages=messages,
+                    temperature=0.7,
+                    max_tokens=500  # 增加 token 數量以容納更長的回應
+                )
+                ai_response = response.choices[0].message.content
+            else:
+                messages = [
+                    {'role': 'system', 'content': system_prompt},
+                    {'role': 'user', 'content': user_message}
+                ]
+                response = ollama.chat(
+                    model=self.model_name,
+                    messages=messages
+                )
+                ai_response = response['message']['content']
+            
+            print(f"AI 回應耗時: {time.time() - start_time:.2f}秒")
+            
+            # 記錄 AI 回應
+            conversation_memory.add_message(employee_data['name'], ai_response, 'assistant')
+            
+            return ai_response
+            
+        except Exception as e:
+            print(f"處理用戶訊息時發生錯誤: {e}")
+            import traceback
+            traceback.print_exc()
+            return "抱歉，我現在無法正常回應。請稍後再試。"
