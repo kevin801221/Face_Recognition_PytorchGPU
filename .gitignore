@@ -1,0 +1,52 @@
+# 隱私數據
+training_images/
+face_features.json
+current_session_log.json
+detection_log.json
+detection_log.json.bak
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# 虛擬環境
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+
+# Windows
+vc_redist.x64.exe
+
+# 模型文件
+models/buffalo_l.zip
+models/buffalo_l/*.onnx
+models/buffalo_l/1k3d68.onnx
+models/buffalo_l/w600k_r50.onnx
+models/*.onnx
+models/*.bin
+models/*.zip
+
+# 其他大文件
+*.onnx
+*.bin
+*.zip
+*.pth
+*.pt
+*.h5
+*.hdf5
+*.pkl
+*.joblib
+
+# 音頻文件
+audio/*.mp3
+audio/*.wav
+audio/
+
+# 其他
+*.log
+.DS_Store
