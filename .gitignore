@@ -22,6 +22,26 @@ ENV/
 # Windows
 vc_redist.x64.exe
 
+# 模型文件
+models/buffalo_l.zip
+models/buffalo_l/*.onnx
+models/buffalo_l/1k3d68.onnx
+models/buffalo_l/w600k_r50.onnx
+models/*.onnx
+models/*.bin
+models/*.zip
+
+# 其他大文件
+*.onnx
+*.bin
+*.zip
+*.pth
+*.pt
+*.h5
+*.hdf5
+*.pkl
+*.joblib
+
 # 其他
 *.log
 .DS_Store
