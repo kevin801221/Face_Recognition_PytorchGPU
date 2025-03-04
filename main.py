@@ -84,38 +84,37 @@ def main():
     
     if args.use_voice:
         try:
-            # 優先嘗試初始化 ElevenLabs TTS 服務
-            from utils.elevenlabs_tts import ElevenLabsTTS
-            elevenlabs_tts = ElevenLabsTTS()
-            if not elevenlabs_tts.initialized:
-                elevenlabs_tts = None
-                print("ElevenLabs TTS 服務初始化失敗，嘗試使用其他 TTS 服務")
-        except Exception as e:
-            print(f"初始化 ElevenLabs TTS 時出錯: {e}")
-            elevenlabs_tts = None
-        else:
-            chatgpt_tts = None
-            inai_tts = None
-            print("使用 ElevenLabs TTS 服務")
-            
-        # 如果 ElevenLabs TTS 初始化失敗，嘗試使用 ChatGPT TTS
-        if elevenlabs_tts is None:
-            try:
-                # 嘗試初始化 ChatGPT TTS 服務
-                from services.chatgpt_tts_service import ChatGPTTTSService
-                chatgpt_tts = ChatGPTTTSService()
-                if not chatgpt_tts.initialized:
-                    chatgpt_tts = None
-                    print("ChatGPT TTS 服務初始化失敗，嘗試使用 Inai TTS 服務")
-            except Exception as e:
-                print(f"初始化 ChatGPT TTS 服務時出錯: {e}")
+            # 優先嘗試初始化 ChatGPT TTS 服務
+            from services.chatgpt_tts_service import ChatGPTTTSService
+            chatgpt_tts = ChatGPTTTSService()
+            if not chatgpt_tts.initialized:
                 chatgpt_tts = None
+                print("ChatGPT TTS 服務初始化失敗，嘗試使用其他 TTS 服務")
             else:
+                elevenlabs_tts = None
                 inai_tts = None
                 print("使用 ChatGPT TTS 服務")
+        except Exception as e:
+            print(f"初始化 ChatGPT TTS 服務時出錯: {e}")
+            chatgpt_tts = None
             
-            # 如果 ElevenLabs TTS 和 ChatGPT TTS 都初始化失敗，嘗試使用 Inai TTS
-            if chatgpt_tts is None:
+            # 如果 ChatGPT TTS 初始化失敗，嘗試使用 ElevenLabs TTS
+            try:
+                # 嘗試初始化 ElevenLabs TTS 服務
+                from utils.elevenlabs_tts import ElevenLabsTTS
+                elevenlabs_tts = ElevenLabsTTS()
+                if not elevenlabs_tts.initialized:
+                    elevenlabs_tts = None
+                    print("ElevenLabs TTS 服務初始化失敗，嘗試使用 Inai TTS 服務")
+                else:
+                    inai_tts = None
+                    print("使用 ElevenLabs TTS 服務")
+            except Exception as e:
+                print(f"初始化 ElevenLabs TTS 時出錯: {e}")
+                elevenlabs_tts = None
+                
+            # 如果 ElevenLabs TTS 初始化失敗，嘗試使用 Inai TTS
+            if elevenlabs_tts is None:
                 try:
                     from services.inai_tts_service import InaiTTSService
                     inai_tts = InaiTTSService()
