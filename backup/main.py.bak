@@ -1,0 +1,595 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+import os
+import cv2
+import numpy as np
+import torch
+import argparse
+import threading
+import time
+from datetime import datetime
+from queue import Queue
+from dotenv import load_dotenv
+
+# UI Components
+from PySide6.QtWidgets import QApplication
+from gui.chat_window import ChatWindow
+
+# Utilities
+from utils.resource_monitor import ResourceMonitor
+from utils.speech_input import SpeechRecognizer
+from utils.conversation_memory import EnhancedConversationMemory
+from utils.whisper_speech import WhisperSpeechRecognizer
+from utils.elevenlabs_tts import ElevenLabsTTS
+from utils.langgraph_conversation import LangGraphConversation, ConversationState
+
+# Services
+from services.face_service import FaceService
+from services.api_client import get_employee_data
+from services.llm_service import LLMService
+
+# Configuration
+from config import CAMERA_WIDTH, CAMERA_HEIGHT, parse_arguments, OPENAI_API_KEY, ELEVENLABS_API_KEY, ELEVENLABS_VOICE_ID, WHISPER_MODEL, LLM_MODEL
+
+def main():
+    """Main application entry point"""
+    # Load environment variables
+    load_dotenv()
+    
+    # Parse command line arguments
+    args = parse_arguments()
+    
+    # Initialize Qt application
+    qt_app = QApplication.instance()
+    if not qt_app:
+        qt_app = QApplication([])
+    
+    # Initialize chat window
+    chat_window = ChatWindow()
+    chat_window.show()
+    
+    # ?ˆé¡¯ç¤ºæ¸¬è©¦æ???    chat_window.show_message("ç³»çµ±?Ÿå?æ¸¬è©¦ï¼šè??æ‚¨?½ç??°é€™æ?æ¶ˆæ¯?Žï?")
+
+    # æª¢æŸ¥ API å¯†é‘°
+    if args.model in ["gpt4o", "gpt-4o", "gpt-4"]:
+        api_key = os.getenv('OPENAI_API_KEY')
+        if not api_key:
+            print("è­¦å?ï¼šæ‰¾ä¸åˆ° OPENAI_API_KEY ?°å?è®Šæ•¸ï¼?)
+            chat_window.show_message("è­¦å?: OpenAI API å¯†é‘°?ªè¨­ç½®ï?ç³»çµ±?¯èƒ½?¡æ?æ­?¸¸å·¥ä???)
+    
+    chat_window.show_message(f"ç³»çµ±?Ÿå?: ä½¿ç”¨ {args.model} æ¨¡å?ï¼Œå??œæ‚¨?‹åˆ°æ­¤æ??¯ï??Œé¢æ­?¸¸å·¥ä???)
+    
+    # Initialize resource monitor
+    resource_monitor = ResourceMonitor(target_cpu_percent=args.cpu_limit)
+    resource_monitor.start_monitoring()
+    
+    # Initialize conversation memory
+    conversation_memory = EnhancedConversationMemory()
+    
+    # Initialize LLM service
+    llm_service = LLMService(model_name=args.model)
+    
+    # Initialize face service
+    face_service = FaceService()
+    
+    # ?å??–è??³æ???    if args.use_voice:
+        # ä½¿ç”¨ Whisper ?²è?èªžéŸ³è­˜åˆ¥
+        whisper_recognizer = WhisperSpeechRecognizer(api_key=OPENAI_API_KEY, model=WHISPER_MODEL)
+        # ä½¿ç”¨ ElevenLabs ?²è?èªžéŸ³?ˆæ?
+        elevenlabs_tts = ElevenLabsTTS(api_key=ELEVENLABS_API_KEY, voice_id=ELEVENLABS_VOICE_ID)
+        chat_window.show_message("èªžéŸ³?å?å·²å??¨ï?ä½¿ç”¨ Whisper ?²è?èªžéŸ³è­˜åˆ¥ï¼ŒElevenLabs ?²è?èªžéŸ³?ˆæ???)
+    else:
+        # ä½¿ç”¨é»˜è??„è??³è???        whisper_recognizer = None
+        elevenlabs_tts = None
+    
+    # ?å??–å‚³çµ±è??³è??¥å™¨ï¼ˆä??ºå??¨ï?
+    speech_recognizer = SpeechRecognizer()
+    
+    # ?å???LangGraph å°è©±ç®¡ç???    if args.use_langgraph:
+        langgraph_conversation = LangGraphConversation(model_name=LLM_MODEL, api_key=OPENAI_API_KEY)
+        chat_window.show_message("LangGraph å°è©±ç®¡ç??¨å·²?Ÿç”¨??)
+    else:
+        langgraph_conversation = None
+    
+    # Feature matching queue
+    feature_queue = Queue()
+    result_queue = Queue()
+    
+    # Start face recognition
+    realtime_face_recognition(
+        args=args,
+        chat_window=chat_window,
+        resource_monitor=resource_monitor,
+        conversation_memory=conversation_memory,
+        llm_service=llm_service,
+        face_service=face_service,
+        speech_recognizer=speech_recognizer,
+        whisper_recognizer=whisper_recognizer,
+        elevenlabs_tts=elevenlabs_tts,
+        langgraph_conversation=langgraph_conversation,
+        feature_queue=feature_queue,
+        result_queue=result_queue
+    )
+    
+    # Start Qt event loop
+    qt_app.exec()
+    
+def realtime_face_recognition(
+    args, 
+    chat_window, 
+    resource_monitor, 
+    conversation_memory, 
+    llm_service, 
+    face_service, 
+    speech_recognizer, 
+    whisper_recognizer,
+    elevenlabs_tts,
+    langgraph_conversation,
+    feature_queue, 
+    result_queue
+):
+    """Real-time face recognition main function"""
+    print("?Ÿå??³æ?äººè?è­˜åˆ¥...")
+    
+    # Load face features
+    known_face_data = face_service.load_face_features()
+    if not known_face_data:
+        print("?¡æ?? è?äººè??¹å¾µï¼Œç³»çµ±å??¡æ?è­˜åˆ¥?¨æˆ¶")
+    
+    # Initialize camera
+    cap = cv2.VideoCapture(0)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAMERA_WIDTH)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_HEIGHT)
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Reduce buffer to decrease latency
+    
+    if not cap.isOpened():
+        print("?¡æ??‹å??å???)
+        return
+    
+    # Initialize variables for main loop
+    frame_count = 0
+    current_person = None
+    employee_cache = {}
+    recent_detections = {}
+    active_conversations = set()
+    
+    # Sleep mode variables
+    sleep_mode = False
+    last_face_position = None
+    no_face_counter = 0
+    POSITION_THRESHOLD = 50
+    NO_FACE_THRESHOLD = 30
+    
+    # Performance monitoring variables
+    fps_counter = 0
+    fps_start_time = time.time()
+    current_fps = 0
+    
+    # Motion detection variables
+    prev_gray = None
+    motion_threshold = 5.0
+    
+    # Initialize feature matching worker thread
+    def feature_matching_worker():
+        while True:
+            try:
+                if not feature_queue.empty():
+                    face_feature = feature_queue.get()
+                    best_match, min_distance = face_service.batch_feature_matching(
+                        face_feature, known_face_data
+                    )
+                    result_queue.put((best_match, min_distance))
+                else:
+                    time.sleep(0.01)
+            except Exception as e:
+                print(f"?¹å¾µæ¯”å??¯èª¤: {e}")
+                time.sleep(0.1)
+    
+    # Start feature matching thread
+    feature_thread = threading.Thread(target=feature_matching_worker, daemon=True)
+    feature_thread.start()
+    
+    # Initialize speech recognition
+    speech_text_buffer = ""
+    last_speech_time = time.time()
+    SPEECH_TIMEOUT = 2.0
+    
+    # ?å???LangGraph ?€??    if langgraph_conversation and langgraph_conversation.initialized:
+        langgraph_state = ConversationState().to_dict()
+    else:
+        langgraph_state = None
+    
+    def process_speech_input():
+        nonlocal speech_text_buffer, last_speech_time
+        
+        current_time = time.time()
+        if speech_text_buffer and (current_time - last_speech_time) >= SPEECH_TIMEOUT:
+            if current_person:
+                print(f"?ªå??¼é€è??³è¼¸?? {speech_text_buffer}")
+                chat_window.input_field.setText(speech_text_buffer)
+                chat_window.send_message()
+                speech_text_buffer = ""
+            else:
+                print("?ªæª¢æ¸¬åˆ°?¨æˆ¶ï¼Œç„¡æ³•ç™¼?è??³è¼¸??)
+    
+    def on_speech_detected(text):
+        nonlocal speech_text_buffer, last_speech_time
+        if text:
+            speech_text_buffer = text
+            last_speech_time = time.time()
+            chat_window.input_field.setText(speech_text_buffer)
+    
+    # è¨­ç½®?³çµ±èªžéŸ³è­˜åˆ¥?žèª¿
+    speech_recognizer.on_speech_detected = on_speech_detected
+    
+    # è¨­ç½® Whisper èªžéŸ³è­˜åˆ¥?žèª¿ï¼ˆå??œå??¨ï?
+    if whisper_recognizer and whisper_recognizer.initialized:
+        whisper_recognizer.on_speech_detected = on_speech_detected
+        # ?Ÿå? Whisper èªžéŸ³è­˜åˆ¥ç·šç?
+        whisper_thread = threading.Thread(target=whisper_recognizer.start_listening, daemon=True)
+        whisper_thread.start()
+        print("Whisper èªžéŸ³è­˜åˆ¥?å?å·²å???)
+    else:
+        # ?Ÿå??³çµ±èªžéŸ³è­˜åˆ¥ç·šç?
+        speech_thread = threading.Thread(target=speech_recognizer.start_listening, daemon=True)
+        speech_thread.start()
+        print("?³çµ±èªžéŸ³è­˜åˆ¥?å?å·²å???)
+    
+    # ?Ÿå? LangGraph å°è©±ç®¡ç??¨ç?ç¨‹ï?å¦‚æ??Ÿç”¨ï¼?    if langgraph_conversation and langgraph_conversation.initialized:
+        print("LangGraph å°è©±ç®¡ç??¨å·²?Ÿå?")
+    
+    # Set chat window message handler
+    def on_user_message(message):
+        nonlocal current_person, employee_cache, langgraph_state
+        print(f"?¶åˆ°?¨æˆ¶æ¶ˆæ¯: {message}")  # æ·»å??¥è?
+        
+        # æ¸¬è©¦?´æŽ¥?žæ?ï¼Œæª¢?¥ç??¢æ›´?°æ˜¯?¦æ­£å¸?        chat_window.show_message(f"?¶åˆ°æ¶ˆæ¯: {message}ï¼Œæ­£?¨è???..")
+        
+        # å¦‚æ??Ÿç”¨äº?LangGraphï¼Œä½¿??LangGraph ?•ç?æ¶ˆæ¯
+        if langgraph_conversation and langgraph_conversation.initialized and langgraph_state:
+            try:
+                # æ·»å??¨æˆ¶æ¶ˆæ¯??LangGraph ?€??                langgraph_state = langgraph_conversation.add_user_message(langgraph_state, message)
+                
+                # è¨­ç½®?¶å??¨æˆ¶ä¿¡æ¯
+                if current_person and current_person in employee_cache:
+                    employee_data = employee_cache[current_person]
+                    langgraph_state["employee_data"] = employee_data
+                    langgraph_state["current_user"] = current_person
+                
+                # ?•ç?æ¶ˆæ¯
+                response, audio_path = langgraph_conversation.process_message(
+                    message,
+                    employee_data=employee_cache.get(current_person, {}),
+                    current_user=current_person
+                )
+                
+                print(f"AI ?žæ?: {response}")  # æ·»å??¥è?
+                chat_window.show_message(response)
+                
+                # å¦‚æ??‰è??³å??‰ï??­æ”¾èªžéŸ³
+                if audio_path and elevenlabs_tts and elevenlabs_tts.initialized:
+                    # ä½¿ç”¨ç³»çµ±é»˜è??­æ”¾?¨æ’­?¾è???                    import subprocess
+                    try:
+                        subprocess.Popen(['start', audio_path], shell=True)
+                    except Exception as e:
+                        print(f"?­æ”¾èªžéŸ³?‚å‡º?? {e}")
+            except Exception as e:
+                print(f"LangGraph ?•ç?æ¶ˆæ¯?‚å‡º?? {e}")
+                chat_window.show_message(f"?•ç?æ¶ˆæ¯?‚å‡º?? {e}")
+                
+                # å¦‚æ? LangGraph ?•ç?å¤±æ?ï¼Œå??€?°å‚³çµ±è??†æ–¹å¼?                fallback_to_traditional = True
+            else:
+                fallback_to_traditional = False
+        else:
+            fallback_to_traditional = True
+        
+        # å¦‚æ??€è¦å??€?°å‚³çµ±è??†æ–¹å¼ï??–è€?LangGraph ?ªå???        if fallback_to_traditional:
+            # æ­?¸¸?žæ??è¼¯
+            if current_person and current_person in employee_cache:
+                try:
+                    response = llm_service.handle_user_message(
+                        employee_cache[current_person],
+                        message,
+                        conversation_memory
+                    )
+                    print(f"AI ?žæ?: {response}")  # æ·»å??¥è?
+                    chat_window.show_message(response)
+                    
+                    # å¦‚æ??Ÿç”¨äº†è??³å??ï?ä½¿ç”¨ ElevenLabs ?ˆæ?èªžéŸ³
+                    if elevenlabs_tts and elevenlabs_tts.initialized:
+                        audio_path = elevenlabs_tts.synthesize_speech(response)
+                        if audio_path:
+                            # ä½¿ç”¨ç³»çµ±é»˜è??­æ”¾?¨æ’­?¾è???                            import subprocess
+                            try:
+                                subprocess.Popen(['start', audio_path], shell=True)
+                            except Exception as e:
+                                print(f"?­æ”¾èªžéŸ³?‚å‡º?? {e}")
+                except Exception as e:
+                    print(f"?•ç?æ¶ˆæ¯?‚å‡º?? {e}")
+                    chat_window.show_message(f"?•ç?æ¶ˆæ¯?‚å‡º?? {e}")
+            else:
+                chat_window.show_message("?±æ?ï¼Œæ??¾åœ¨?¡æ?ç¢ºå?ä½ æ˜¯èª°ã€‚è?è®“æ??‹æ?ä½ ç??‰ã€?)
+
+    # ç¢ºä?æ­?¢º??Ž¥ä¿¡è?
+    chat_window.message_sent.connect(on_user_message)
+    
+    print("?³æ?äººè?è­˜åˆ¥ç³»çµ±å·²å???..")
+    
+    # Main loop
+    while True:
+        try:
+            loop_start = time.time()
+            
+            ret, frame = cap.read()
+            if not ret:
+                print("?¡æ?è®€?–å½±??)
+                time.sleep(0.1)
+                continue
+            
+            # Update FPS counter
+            fps_counter += 1
+            if time.time() - fps_start_time >= 5:
+                current_fps = fps_counter / (time.time() - fps_start_time)
+                print(f"?®å? FPS: {current_fps:.1f}, CPU ä½¿ç”¨?? {resource_monitor.current_cpu_percent:.1f}%")
+                fps_counter = 0
+                fps_start_time = time.time()
+            
+            # Increment frame count
+            frame_count += 1
+            
+            # Skip processing based on CPU usage
+            if not resource_monitor.should_process_frame(frame_count):
+                if current_person:
+                    # If a user was previously identified, display the name
+                    cv2.putText(
+                        frame,
+                        f"Identified: {current_person}",
+                        (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.9,
+                        (0, 255, 0),
+                        2
+                    )
+                
+                cv2.imshow('Face Recognition', frame)
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    break
+                continue
+            
+            # Simple motion detection
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            gray = cv2.GaussianBlur(gray, (21, 21), 0)
+            
+            motion_detected = False
+            if prev_gray is not None:
+                frame_diff = cv2.absdiff(gray, prev_gray)
+                motion_score = np.mean(frame_diff)
+                motion_detected = motion_score > motion_threshold
+            
+            prev_gray = gray.copy()
+            
+            # Only detect faces when motion is detected or periodically
+            faces = []
+            if motion_detected or frame_count % 15 == 0:
+                faces = face_service.detect_faces(frame)
+            
+            # Update no face counter
+            if not faces:
+                no_face_counter += 1
+                if no_face_counter >= NO_FACE_THRESHOLD:
+                    sleep_mode = False
+                    last_face_position = None
+                    current_person = None
+                
+                cv2.imshow('Face Recognition', frame)
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    break
+                continue
+            else:
+                no_face_counter = 0
+            
+            current_time = datetime.now().strftime("%H:%M:%S")
+            
+            # In sleep mode, only check for position changes
+            if sleep_mode and faces:
+                face = faces[0]
+                # æª¢æŸ¥ face ?„ç?æ§‹é??‹ï??¹æ?ä¸å??„ç?æ§‹ç²??bbox
+                if hasattr(face, 'bbox'):
+                    # InsightFace ?´æŽ¥è¿”å??„ç‰©ä»?                    current_pos = (face.bbox[0], face.bbox[1])
+                elif isinstance(face, dict) and 'bbox' in face:
+                    # ä»¥å??¸å½¢å¼å?è£ç??©ä»¶
+                    current_pos = (face['bbox'][0], face['bbox'][1])
+                else:
+                    # ?ªèƒ½è­˜åˆ¥?„ç?æ§‹ï?ä½¿ç”¨é»˜è???                    current_pos = (0, 0)
+                    print("è­¦å?: ?¡æ?è­˜åˆ¥äººè?çµæ?é¡žå?")
+                
+                if last_face_position:
+                    dx = current_pos[0] - last_face_position[0]
+                    dy = current_pos[1] - last_face_position[1]
+                    distance = np.sqrt(dx*dx + dy*dy)
+                    
+                    if distance > POSITION_THRESHOLD:
+                        print("æª¢æ¸¬?°é¡¯?—ç§»?•ï??€?ºä?? æ¨¡å¼?)
+                        sleep_mode = False
+                
+                last_face_position = current_pos
+                
+                # Use the last identified person in sleep mode
+                for person_id, last_time in recent_detections.items():
+                    if (datetime.strptime(current_time, "%H:%M:%S") - 
+                        datetime.strptime(last_time, "%H:%M:%S")).total_seconds() < 30:
+                        current_person = person_id
+                        break
+            
+            # Full face recognition in non-sleep mode
+            if not sleep_mode and faces:
+                face = faces[0]
+                
+                # æª¢æŸ¥ face ?„ç?æ§‹é??‹ï??¹æ?ä¸å??„ç?æ§‹ç²?–è?è¨?                if hasattr(face, 'bbox') and hasattr(face, 'normed_embedding'):
+                    # InsightFace ?´æŽ¥è¿”å??„ç‰©ä»?                    current_pos = (face.bbox[0], face.bbox[1])
+                    face_feature = face.normed_embedding
+                    bbox = face.bbox.astype(int)
+                elif isinstance(face, dict):
+                    # ä»¥å??¸å½¢å¼å?è£ç??©ä»¶
+                    current_pos = (face['bbox'][0], face['bbox'][1])
+                    face_feature = face['embedding'] if 'embedding' in face else None
+                    bbox = face['bbox'].astype(int) if 'bbox' in face else np.array([0, 0, 100, 100])
+                else:
+                    # ?ªèƒ½è­˜åˆ¥?„ç?æ§‹ï?ä½¿ç”¨é»˜è???                    current_pos = (0, 0)
+                    face_feature = None
+                    bbox = np.array([0, 0, 100, 100])
+                    print("è­¦å?: ?¡æ?è­˜åˆ¥äººè?çµæ?é¡žå?")
+                
+                last_face_position = current_pos
+                
+                # Extract face feature
+                if face_feature is not None:
+                    # Add to feature matching queue
+                    if feature_queue.qsize() < 5:
+                        feature_queue.put(face_feature)
+                    
+                    # Check for matching results
+                    if not result_queue.empty():
+                        best_match, min_distance = result_queue.get()
+                        
+                        # If a match is found
+                        if best_match and min_distance < 0.3:
+                            print(f"è­˜åˆ¥?°ç”¨?? {best_match}, è·é›¢: {min_distance:.4f}")
+                            current_person = best_match
+                            recent_detections[current_person] = current_time
+                            
+                            # If this person is not cached
+                            if current_person not in employee_cache:
+                                try:
+                                    print(f"?—è©¦?²å??¡å·¥è³‡æ?: {current_person}")
+                                    employee_data = get_employee_data(current_person)
+                                    if employee_data:
+                                        print(f"?å??²å??¡å·¥è³‡æ?: {employee_data['name']}")
+                                        employee_cache[current_person] = employee_data
+                                        
+                                        # If this is a new conversation
+                                        if current_person not in active_conversations:
+                                            print("?‹å??°å?è©?)
+                                            
+                                            # Start a new conversation in a separate thread
+                                            def start_conversation():
+                                                response = llm_service.chat_with_employee(
+                                                    employee_data,
+                                                    is_first_chat=True
+                                                )
+                                                if response:
+                                                    chat_window.show_message(response)
+                                            
+                                            threading.Thread(target=start_conversation, daemon=True).start()
+                                            active_conversations.add(current_person)
+                                except Exception as e:
+                                    print(f"?²å??¡å·¥è³‡æ??‚ç™¼?ŸéŒ¯èª? {e}")
+                            
+                            # Generate conversation summary every 10 minutes
+                            if current_person in active_conversations:
+                                current_minute = datetime.now().minute
+                                if current_minute % 10 == 0 and current_minute != 0:
+                                    threading.Thread(
+                                        target=conversation_memory.generate_conversation_summary,
+                                        args=(current_person, llm_service),
+                                        daemon=True
+                                    ).start()
+                        else:
+                            print(f"?¡æ?è­˜åˆ¥?¨æˆ¶ï¼Œæ?å°è??? {min_distance:.4f}")
+                            # Only reset current user when distance is very large
+                            if min_distance > 0.6:
+                                current_person = None
+            
+            # Process speech input
+            process_speech_input()
+            
+            # Draw faces on frame
+            if faces:
+                face = faces[0]
+                
+                # æª¢æŸ¥ face ?„ç?æ§‹é??‹ï??¹æ?ä¸å??„ç?æ§‹ç²??bbox
+                if hasattr(face, 'bbox'):
+                    # InsightFace ?´æŽ¥è¿”å??„ç‰©ä»?                    bbox = face.bbox.astype(int)
+                elif isinstance(face, dict) and 'bbox' in face:
+                    # ä»¥å??¸å½¢å¼å?è£ç??©ä»¶
+                    bbox = face['bbox'].astype(int)
+                else:
+                    # ?ªèƒ½è­˜åˆ¥?„ç?æ§‹ï?ä½¿ç”¨é»˜è???                    bbox = np.array([0, 0, 100, 100])
+                    print("è­¦å?: ?¡æ?è­˜åˆ¥äººè?çµæ?é¡žå?")
+                
+                # Choose color based on recognition result
+                if current_person:
+                    color = (0, 255, 0)  # Green - identified
+                else:
+                    color = (0, 165, 255)  # Orange - unidentified
+                
+                cv2.rectangle(frame, (bbox[0], bbox[1]), (bbox[2], bbox[3]), color, 2)
+                
+                if current_person:
+                    # Display name above the face
+                    cv2.putText(
+                        frame,
+                        current_person,
+                        (bbox[0], bbox[1] - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.9,
+                        color,
+                        2
+                    )
+                    
+                    # Display system info in corner
+                    cv2.putText(
+                        frame,
+                        f"CPU: {resource_monitor.current_cpu_percent:.1f}%",
+                        (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.7,
+                        (255, 255, 255),
+                        2
+                    )
+                    cv2.putText(
+                        frame,
+                        f"FPS: {current_fps:.1f}",
+                        (10, 60),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.7,
+                        (255, 255, 255),
+                        2
+                    )
+            
+            # Calculate and display processing time
+            process_time = time.time() - loop_start
+            if process_time > 0.1:
+                print(f"è­¦å?: ?•ç??‚é?è¼ƒé•· {process_time:.3f}ç§?)
+            
+            cv2.imshow('Face Recognition', frame)
+            
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
+            
+            # Release CPU to avoid 100% usage
+            if process_time < 0.03:
+                time.sleep(0.01)
+                
+        except Exception as e:
+            print(f"ä¸»å¾ª?°éŒ¯èª? {e}")
+            import traceback
+            traceback.print_exc()
+            time.sleep(0.1)
+    
+    # Release resources
+    cap.release()
+    cv2.destroyAllWindows()
+    resource_monitor.stop_monitoring()
+    speech_recognizer.stop_listening()
+    
+    print("?³æ?äººè?è­˜åˆ¥ç³»çµ±å·²é???)
+
+def train_face(name=None):
+    """Function to train a new face for recognition"""
+    face_service = FaceService()
+    face_service.train_face(name)
+
+if __name__ == "__main__":
+    main()

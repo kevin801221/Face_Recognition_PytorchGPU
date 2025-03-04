@@ -1,0 +1,63 @@
+{
+  "certificates": [
+    {
+      "certificate_number": "DL-123456",
+      "expiry_date": null,
+      "id": 1,
+      "issue_date": "2023-02-22T14:17:02",
+      "issuing_organization": "Coursera",
+      "name": "Deep Learning Specialization"
+    },
+    {
+      "certificate_number": "TF-789012",
+      "expiry_date": null,
+      "id": 2,
+      "issue_date": "2024-02-22T14:17:02",
+      "issuing_organization": "Google",
+      "name": "TensorFlow Developer Certificate"
+    }
+  ],
+  "chinese_name": "凱文",
+  "created_at": "2025-02-21T06:17:02",
+  "department": "AI部門",
+  "email": "kevin@example.com",
+  "hire_date": "2023-02-22T14:17:02",
+  "id": 1,
+  "interests": [
+    "機器學習",
+    "攝影",
+    "閱讀"
+  ],
+  "name": "Kevin",
+  "position": "AI神級工程師",
+  "status": "active",
+  "technical_skills": [
+    "Python",
+    "TensorFlow",
+    "PyTorch",
+    "Computer Vision",
+    "Deep Learning"
+  ],
+  "total_years_experience": 4.0,
+  "updated_at": "2025-02-21T06:17:02",
+  "work_experiences": [
+    {
+      "company_name": "AI創新科技",
+      "description": "負責影像辨識模型開發",
+      "end_date": "2023-02-22T14:17:02",
+      "id": 1,
+      "position": "初級AI工程師",
+      "start_date": "2021-02-22T14:17:02",
+      "years_of_service": 2.0
+    },
+    {
+      "company_name": "智慧系統有限公司",
+      "description": "負責自然語言處理項目",
+      "end_date": null,
+      "id": 2,
+      "position": "AI研發工程師",
+      "start_date": "2023-02-22T14:17:02",
+      "years_of_service": 2.0
+    }
+  ]
+}
