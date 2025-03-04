@@ -42,6 +42,11 @@ models/*.zip
 *.pkl
 *.joblib
 
+# 音頻文件
+audio/*.mp3
+audio/*.wav
+audio/
+
 # 其他
 *.log
 .DS_Store
